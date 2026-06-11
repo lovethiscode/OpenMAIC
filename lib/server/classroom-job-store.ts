@@ -6,6 +6,7 @@ import type {
   GenerateClassroomInput,
   GenerateClassroomResult,
 } from '@/lib/server/classroom-generation';
+import type { PublishedClassroomArtifact } from '@/lib/server/classroom-publisher';
 import {
   CLASSROOM_JOBS_DIR,
   ensureClassroomJobsDir,
@@ -32,10 +33,16 @@ export interface ClassroomGenerationJob {
   };
   scenesGenerated: number;
   totalScenes?: number;
+  ttsGenerated?: number;
+  totalTts?: number;
   result?: {
     classroomId: string;
     url: string;
     scenesCount: number;
+    zipUrl?: string;
+    artifactKey?: string;
+    storage?: 'oss';
+    localClassroomAvailable?: boolean;
   };
   error?: string;
 }
@@ -188,12 +195,15 @@ export async function updateClassroomGenerationJobProgress(
     message: progress.message,
     scenesGenerated: progress.scenesGenerated,
     totalScenes: progress.totalScenes,
+    ttsGenerated: progress.ttsGenerated,
+    totalTts: progress.totalTts,
   });
 }
 
 export async function markClassroomGenerationJobSucceeded(
   jobId: string,
   result: GenerateClassroomResult,
+  artifact?: PublishedClassroomArtifact,
 ): Promise<ClassroomGenerationJob> {
   return updateClassroomGenerationJob(jobId, {
     status: 'succeeded',
@@ -206,6 +216,10 @@ export async function markClassroomGenerationJobSucceeded(
       classroomId: result.id,
       url: result.url,
       scenesCount: result.scenesCount,
+      zipUrl: artifact?.zipUrl,
+      artifactKey: artifact?.artifactKey,
+      storage: artifact?.storage,
+      localClassroomAvailable: artifact?.localClassroomAvailable ?? true,
     },
   });
 }

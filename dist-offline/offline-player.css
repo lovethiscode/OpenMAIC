@@ -1,0 +1,698 @@
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#openmaic-offline-root {
+  width: 100%;
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background: #111827;
+  color: #111827;
+  font-family:
+    Inter,
+    ui-sans-serif,
+    system-ui,
+    -apple-system,
+    BlinkMacSystemFont,
+    'Segoe UI',
+    sans-serif;
+  overflow: hidden;
+}
+
+button {
+  border: 0;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+  padding: 0;
+}
+
+button:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+.omaic-app {
+  display: grid;
+  grid-template-rows: 48px 1fr auto;
+  width: 100%;
+  height: 100%;
+  background: #111827;
+}
+
+.omaic-topbar {
+  align-items: center;
+  background: rgba(15, 23, 42, 0.96);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  color: #f8fafc;
+  display: flex;
+  justify-content: center;
+  min-width: 0;
+  padding: 8px 16px;
+}
+
+.omaic-title {
+  font-size: 15px;
+  font-weight: 650;
+  max-width: min(760px, calc(100vw - 32px));
+  overflow: hidden;
+  text-align: center;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.omaic-controls {
+  align-items: center;
+  background: rgba(255, 255, 255, 0.88);
+  border: 1px solid rgba(148, 163, 184, 0.24);
+  border-radius: 12px;
+  bottom: 16px;
+  box-shadow:
+    0 12px 32px rgba(15, 23, 42, 0.18),
+    0 2px 8px rgba(15, 23, 42, 0.08);
+  color: #64748b;
+  display: flex;
+  gap: 3px;
+  height: 38px;
+  left: 50%;
+  padding: 4px 6px;
+  position: absolute;
+  transform: translateX(-50%);
+  transition:
+    opacity 180ms ease,
+    transform 180ms ease;
+  z-index: 20;
+}
+
+.omaic-controls-hidden {
+  opacity: 0;
+  pointer-events: none;
+  transform: translate(-50%, 8px);
+}
+
+.omaic-scene-count {
+  color: #64748b;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  font-weight: 650;
+  min-width: 36px;
+  padding: 0 4px;
+  text-align: center;
+  user-select: none;
+}
+
+.omaic-scene-count span {
+  color: #cbd5e1;
+  margin: 0 1px;
+}
+
+.omaic-control-divider {
+  background: rgba(148, 163, 184, 0.42);
+  height: 14px;
+  margin: 0 3px;
+  width: 1px;
+}
+
+.omaic-icon-button,
+.omaic-speed-button {
+  align-items: center;
+  border-radius: 7px;
+  color: #64748b;
+  display: inline-flex;
+  height: 28px;
+  justify-content: center;
+  transition:
+    background-color 150ms ease,
+    color 150ms ease,
+    transform 150ms ease,
+    opacity 150ms ease;
+}
+
+.omaic-icon-button {
+  width: 28px;
+}
+
+.omaic-icon-button svg {
+  height: 16px;
+  stroke-width: 2.2;
+  width: 16px;
+}
+
+.omaic-play-icon {
+  margin-left: 1px;
+}
+
+.omaic-speed-button {
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  font-weight: 750;
+  min-width: 38px;
+  padding: 0 7px;
+}
+
+.omaic-icon-button:hover,
+.omaic-speed-button:hover {
+  background: rgba(100, 116, 139, 0.1);
+  color: #334155;
+}
+
+.omaic-icon-button:active,
+.omaic-speed-button:active {
+  transform: scale(0.92);
+}
+
+.omaic-icon-button-active,
+.omaic-speed-button-active {
+  background: rgba(124, 58, 237, 0.11);
+  color: #7c3aed;
+}
+
+.omaic-icon-button-muted {
+  color: #ef4444;
+}
+
+@media (max-width: 520px) {
+  .omaic-controls {
+    bottom: 10px;
+    gap: 1px;
+    max-width: calc(100vw - 20px);
+    padding: 4px;
+  }
+
+  .omaic-scene-count {
+    min-width: 32px;
+  }
+
+  .omaic-icon-button {
+    width: 26px;
+  }
+
+  .omaic-speed-button {
+    min-width: 34px;
+    padding: 0 5px;
+  }
+}
+
+.omaic-stage {
+  cursor: pointer;
+  min-height: 0;
+  overflow: hidden;
+  position: relative;
+}
+
+.omaic-stage-play-overlay {
+  align-items: center;
+  display: flex;
+  inset: 0;
+  justify-content: center;
+  pointer-events: none;
+  position: absolute;
+  z-index: 18;
+}
+
+.omaic-stage-play-button {
+  align-items: center;
+  backdrop-filter: blur(10px);
+  background: rgba(15, 23, 42, 0.72);
+  border: 1px solid rgba(255, 255, 255, 0.22);
+  border-radius: 999px;
+  box-shadow:
+    0 18px 44px rgba(15, 23, 42, 0.34),
+    0 4px 12px rgba(15, 23, 42, 0.2);
+  color: #fff;
+  display: flex;
+  height: 82px;
+  justify-content: center;
+  width: 82px;
+}
+
+.omaic-stage-play-button svg {
+  height: 34px;
+  margin-left: 4px;
+  stroke-width: 2.2;
+  width: 34px;
+}
+
+.omaic-unsupported-scene,
+.omaic-quiz {
+  background: #f8fafc;
+  color: #0f172a;
+  height: 100%;
+  overflow: auto;
+  width: 100%;
+}
+
+.omaic-unsupported-scene {
+  align-items: center;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  justify-content: center;
+  padding: 24px;
+  text-align: center;
+}
+
+.omaic-unsupported-scene span {
+  color: #64748b;
+  font-size: 14px;
+}
+
+.omaic-quiz {
+  padding: 24px clamp(14px, 4vw, 48px) 72px;
+}
+
+.omaic-quiz-shell {
+  margin: 0 auto;
+  max-width: 920px;
+}
+
+.omaic-quiz-header {
+  align-items: center;
+  display: grid;
+  gap: 14px;
+  grid-template-columns: auto 1fr auto;
+  margin-bottom: 18px;
+}
+
+.omaic-quiz-icon {
+  align-items: center;
+  background: #ede9fe;
+  border-radius: 14px;
+  color: #7c3aed;
+  display: flex;
+  height: 48px;
+  justify-content: center;
+  width: 48px;
+}
+
+.omaic-quiz-icon svg,
+.omaic-quiz-secondary svg,
+.omaic-quiz-result-good svg,
+.omaic-quiz-result-bad svg {
+  height: 20px;
+  width: 20px;
+}
+
+.omaic-quiz-header h2 {
+  font-size: 22px;
+  line-height: 1.25;
+  margin: 0;
+}
+
+.omaic-quiz-header p {
+  color: #64748b;
+  font-size: 13px;
+  margin: 4px 0 0;
+}
+
+.omaic-quiz-score {
+  background: #0f172a;
+  border-radius: 999px;
+  color: #fff;
+  font-size: 14px;
+  font-variant-numeric: tabular-nums;
+  font-weight: 750;
+  padding: 8px 12px;
+}
+
+.omaic-quiz-list {
+  display: grid;
+  gap: 14px;
+}
+
+.omaic-quiz-card {
+  background: #fff;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  box-shadow: 0 8px 28px rgba(15, 23, 42, 0.06);
+  padding: 18px;
+}
+
+.omaic-quiz-question-head {
+  align-items: flex-start;
+  display: grid;
+  gap: 12px;
+  grid-template-columns: auto 1fr auto;
+}
+
+.omaic-quiz-index {
+  align-items: center;
+  background: #eef2ff;
+  border-radius: 999px;
+  color: #4f46e5;
+  display: flex;
+  font-size: 13px;
+  font-weight: 750;
+  height: 28px;
+  justify-content: center;
+  width: 28px;
+}
+
+.omaic-quiz-question-type {
+  color: #64748b;
+  font-size: 12px;
+  font-weight: 650;
+  margin-bottom: 5px;
+  text-transform: uppercase;
+}
+
+.omaic-quiz-question-head h3 {
+  font-size: 16px;
+  line-height: 1.55;
+  margin: 0;
+}
+
+.omaic-quiz-result-good {
+  color: #16a34a;
+}
+
+.omaic-quiz-result-bad {
+  color: #dc2626;
+}
+
+.omaic-quiz-options {
+  display: grid;
+  gap: 8px;
+  margin-top: 14px;
+}
+
+.omaic-quiz-option {
+  align-items: flex-start;
+  background: #fff;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  color: #334155;
+  display: grid;
+  gap: 10px;
+  grid-template-columns: auto 1fr;
+  padding: 11px 12px;
+  text-align: left;
+  transition:
+    background-color 150ms ease,
+    border-color 150ms ease;
+}
+
+.omaic-quiz-option:hover {
+  background: #f8fafc;
+  border-color: #c4b5fd;
+}
+
+.omaic-quiz-option span {
+  align-items: center;
+  background: #f1f5f9;
+  border-radius: 999px;
+  color: #64748b;
+  display: flex;
+  font-size: 12px;
+  font-weight: 750;
+  height: 24px;
+  justify-content: center;
+  width: 24px;
+}
+
+.omaic-quiz-option strong {
+  font-size: 14px;
+  font-weight: 550;
+  line-height: 1.55;
+}
+
+.omaic-quiz-option-selected {
+  background: #f5f3ff;
+  border-color: #8b5cf6;
+}
+
+.omaic-quiz-option-correct {
+  background: #ecfdf5;
+  border-color: #34d399;
+}
+
+.omaic-quiz-textarea {
+  border: 1px solid #cbd5e1;
+  border-radius: 8px;
+  color: #0f172a;
+  font: inherit;
+  line-height: 1.5;
+  margin-top: 14px;
+  min-height: 120px;
+  padding: 12px;
+  resize: vertical;
+  width: 100%;
+}
+
+.omaic-quiz-analysis {
+  background: #fffbeb;
+  border: 1px solid #fde68a;
+  border-radius: 8px;
+  color: #78350f;
+  margin-top: 14px;
+  padding: 12px;
+}
+
+.omaic-quiz-analysis strong {
+  display: block;
+  font-size: 13px;
+  margin-bottom: 4px;
+}
+
+.omaic-quiz-analysis p {
+  font-size: 14px;
+  line-height: 1.6;
+  margin: 0;
+}
+
+.omaic-quiz-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 16px;
+}
+
+.omaic-quiz-primary,
+.omaic-quiz-secondary {
+  align-items: center;
+  border-radius: 999px;
+  display: inline-flex;
+  font-weight: 700;
+  gap: 8px;
+  min-height: 40px;
+  padding: 0 18px;
+}
+
+.omaic-quiz-primary {
+  background: #7c3aed;
+  color: #fff;
+}
+
+.omaic-quiz-secondary {
+  background: #e2e8f0;
+  color: #334155;
+}
+
+.omaic-caption {
+  background: rgba(15, 23, 42, 0.96);
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+  color: #f8fafc;
+  font-size: 15px;
+  line-height: 1.55;
+  max-height: 28vh;
+  overflow: auto;
+  padding: 10px 16px;
+}
+
+.omaic-discussion {
+  color: #bfdbfe;
+  margin-top: 4px;
+}
+
+.omaic-empty,
+.omaic-video-placeholder {
+  align-items: center;
+  background: rgba(15, 23, 42, 0.08);
+  color: #64748b;
+  display: flex;
+  height: 100%;
+  justify-content: center;
+  width: 100%;
+}
+
+.omaic-slide-frame {
+  box-shadow:
+    0 0 0 1px rgba(0, 0, 0, 0.03),
+    0 18px 50px rgba(0, 0, 0, 0.35);
+}
+
+.relative {
+  position: relative;
+}
+
+.absolute {
+  position: absolute;
+}
+
+.inset-0 {
+  inset: 0;
+}
+
+.top-0 {
+  top: 0;
+}
+
+.left-0 {
+  left: 0;
+}
+
+.w-full {
+  width: 100%;
+}
+
+.h-full {
+  height: 100%;
+}
+
+.overflow-hidden {
+  overflow: hidden;
+}
+
+.overflow-visible {
+  overflow: visible;
+}
+
+.select-none {
+  user-select: none;
+}
+
+.pointer-events-none {
+  pointer-events: none;
+}
+
+.rounded,
+.rounded-lg {
+  border-radius: 8px;
+}
+
+.block {
+  display: block;
+}
+
+.flex {
+  display: flex;
+}
+
+.flex-col {
+  flex-direction: column;
+}
+
+.items-center {
+  align-items: center;
+}
+
+.justify-center {
+  justify-content: center;
+}
+
+.justify-start {
+  justify-content: flex-start;
+}
+
+.justify-end {
+  justify-content: flex-end;
+}
+
+.origin-top-left {
+  transform-origin: top left;
+}
+
+.leading-relaxed {
+  line-height: 1.625;
+}
+
+.leading-\[1\.5\] {
+  line-height: 1.5;
+}
+
+.break-words {
+  overflow-wrap: break-word;
+}
+
+.p-\[10px\] {
+  padding: 10px;
+}
+
+.px-2\.5 {
+  padding-left: 10px;
+  padding-right: 10px;
+}
+
+.py-2\.5 {
+  padding-bottom: 10px;
+  padding-top: 10px;
+}
+
+.bg-position-center {
+  background-position: center;
+}
+
+.transition-transform {
+  transition-property: transform;
+}
+
+.duration-700 {
+  transition-duration: 700ms;
+}
+
+.transform-origin-\[0_0\] {
+  transform-origin: 0 0;
+}
+
+.ProseMirror-static p {
+  margin: 0 0 var(--paragraphSpace, 5px);
+}
+
+.ProseMirror-static p:last-child {
+  margin-bottom: 0;
+}
+
+.ProseMirror-static ul {
+  list-style: disc outside;
+  margin: 0;
+  padding-inline-start: 1.5rem;
+}
+
+.ProseMirror-static ol {
+  list-style: decimal outside;
+  margin: 0;
+  padding-inline-start: 1.5rem;
+}
+
+@keyframes omaic-highlight-breathe {
+  0%,
+  100% {
+    opacity: 0.6;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1.02);
+  }
+}
+
+@keyframes omaic-highlight-ping {
+  75%,
+  100% {
+    opacity: 0;
+    transform: scale(1.15);
+  }
+}
+
+.omaic-highlight-breathe {
+  animation: omaic-highlight-breathe 2s ease-in-out infinite;
+}
+
+.omaic-highlight-ping {
+  animation: omaic-highlight-ping 2s cubic-bezier(0, 0, 0.2, 1) infinite;
+}

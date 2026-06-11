@@ -217,6 +217,9 @@ export async function generateTTSForClassroom(
   scenes: Scene[],
   classroomId: string,
   baseUrl: string,
+  options: {
+    onProgress?: (progress: { generated: number; total: number }) => Promise<void> | void;
+  } = {},
 ): Promise<void> {
   const audioDir = path.join(CLASSROOMS_DIR, classroomId, 'audio');
   await ensureDir(audioDir);
@@ -245,6 +248,7 @@ export async function generateTTSForClassroom(
     return;
   }
 
+  const speechActions: Array<{ action: SpeechAction; sceneOrder: number }> = [];
   for (const scene of scenes) {
     if (!scene.actions) continue;
 
@@ -257,32 +261,41 @@ export async function generateTTSForClassroom(
 
     for (const action of scene.actions) {
       if (action.type !== 'speech' || !(action as SpeechAction).text) continue;
-      const speechAction = action as SpeechAction;
-      // Include scene order in audioId to prevent collision across scenes
-      const audioId = `tts_s${sceneOrder}_${action.id}`;
-
-      try {
-        const result = await generateTTS(
-          {
-            providerId,
-            modelId: DEFAULT_TTS_MODELS[providerId as keyof typeof DEFAULT_TTS_MODELS] || '',
-            apiKey,
-            baseUrl: ttsBaseUrl,
-            voice,
-            speed: speechAction.speed,
-          },
-          speechAction.text,
-        );
-
-        const filename = `${audioId}.${result.format || format}`;
-        await fs.writeFile(path.join(audioDir, filename), result.audio);
-
-        speechAction.audioId = audioId;
-        speechAction.audioUrl = mediaServingUrl(baseUrl, classroomId, `audio/${filename}`);
-        log.info(`Generated TTS: ${filename} (${result.audio.length} bytes)`);
-      } catch (err) {
-        log.warn(`TTS generation failed for action ${action.id}:`, err);
-      }
+      speechActions.push({ action: action as SpeechAction, sceneOrder });
     }
+  }
+
+  await options.onProgress?.({ generated: 0, total: speechActions.length });
+
+  let generated = 0;
+  for (const { action, sceneOrder } of speechActions) {
+    const speechAction = action;
+    // Include scene order in audioId to prevent collision across scenes
+    const audioId = `tts_s${sceneOrder}_${action.id}`;
+
+    try {
+      const result = await generateTTS(
+        {
+          providerId,
+          modelId: DEFAULT_TTS_MODELS[providerId as keyof typeof DEFAULT_TTS_MODELS] || '',
+          apiKey,
+          baseUrl: ttsBaseUrl,
+          voice,
+          speed: speechAction.speed,
+        },
+        speechAction.text,
+      );
+
+      const filename = `${audioId}.${result.format || format}`;
+      await fs.writeFile(path.join(audioDir, filename), result.audio);
+
+      speechAction.audioId = audioId;
+      speechAction.audioUrl = mediaServingUrl(baseUrl, classroomId, `audio/${filename}`);
+      log.info(`Generated TTS: ${filename} (${result.audio.length} bytes)`);
+    } catch (err) {
+      log.warn(`TTS generation failed for action ${action.id}:`, err);
+    }
+    generated += 1;
+    await options.onProgress?.({ generated, total: speechActions.length });
   }
 }

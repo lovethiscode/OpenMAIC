@@ -55,6 +55,8 @@ export type ClassroomGenerationStep =
   | 'generating_media'
   | 'generating_tts'
   | 'persisting'
+  | 'exporting'
+  | 'uploading'
   | 'completed';
 
 export interface ClassroomGenerationProgress {
@@ -63,6 +65,8 @@ export interface ClassroomGenerationProgress {
   message: string;
   scenesGenerated: number;
   totalScenes?: number;
+  ttsGenerated?: number;
+  totalTts?: number;
 }
 
 export interface GenerateClassroomResult {
@@ -437,7 +441,19 @@ export async function generateClassroom(
     });
 
     try {
-      await generateTTSForClassroom(scenes, stageId, options.baseUrl);
+      await generateTTSForClassroom(scenes, stageId, options.baseUrl, {
+        onProgress: async ({ generated, total }) => {
+          await options.onProgress?.({
+            step: 'generating_tts',
+            progress: 94,
+            message: `Generated TTS audio ${generated}/${total}`,
+            scenesGenerated: scenes.length,
+            totalScenes: outlines.length,
+            ttsGenerated: generated,
+            totalTts: total,
+          });
+        },
+      });
       log.info('TTS generation complete');
     } catch (err) {
       log.warn('TTS generation phase failed, continuing:', err);
