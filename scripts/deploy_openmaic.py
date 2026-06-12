@@ -8,6 +8,7 @@ the open-maic workspace where possible.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import platform
@@ -20,6 +21,7 @@ import tarfile
 import time
 import tomllib
 import urllib.request
+from datetime import UTC, datetime
 from pathlib import Path
 
 
@@ -31,6 +33,7 @@ COREPACK_HOME = RUNTIME_DIR / "corepack"
 PNPM_STORE = RUNTIME_DIR / "pnpm-store"
 PID_FILE = RUNTIME_DIR / "openmaic.pid"
 LOG_FILE = RUNTIME_DIR / "openmaic.log"
+DEPLOY_ARCHIVE_DIR = RUNTIME_DIR / "deploy"
 DEPLOY_TOML_PATH = ROOT / "deploy.toml"
 
 REPO_URL = "https://github.com/THU-MAIC/OpenMAIC.git"
@@ -39,6 +42,13 @@ NODE_VERSION = "22.12.0"
 MIN_NODE = (20, 9, 0)
 PNPM_VERSION = "10.28.0"
 DEFAULT_PORT = 3000
+DEFAULT_RELEASE_KEEP = 3
+DEFAULT_NPM_REGISTRY = "https://registry.npmmirror.com"
+DEFAULT_NODE_MIRROR = "https://npmmirror.com/mirrors/node"
+DEFAULT_BINARY_MIRROR = "https://npmmirror.com/mirrors"
+DEPLOY_ARCHIVE_EXCLUDES = {
+    "scripts/deploy.toml",
+}
 
 
 class DeployError(RuntimeError):
@@ -124,9 +134,13 @@ def load_remote_config(config_path: Path = DEPLOY_TOML_PATH) -> dict:
     deploy.setdefault("hostname", "0.0.0.0")
     deploy.setdefault("node_version", NODE_VERSION)
     deploy.setdefault("pnpm_version", PNPM_VERSION)
-    deploy.setdefault("repo_url", REPO_URL)
-    deploy.setdefault("tag", OPENMAIC_TAG)
-    deploy.setdefault("remote_env_path", "")
+    deploy.setdefault("npm_registry", DEFAULT_NPM_REGISTRY)
+    deploy.setdefault("node_mirror", DEFAULT_NODE_MIRROR)
+    deploy.setdefault("binary_mirror", DEFAULT_BINARY_MIRROR)
+    deploy.setdefault("remote_releases_dir", f"{deploy['remote_app_dir']}/releases")
+    deploy.setdefault("release_keep", DEFAULT_RELEASE_KEEP)
+    if int(deploy["release_keep"]) < 1:
+        raise DeployError("deploy.toml [deploy].release_keep must be at least 1")
 
     return {"server": server, "deploy": deploy}
 
@@ -135,6 +149,7 @@ def ensure_dirs() -> None:
     RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
     COREPACK_HOME.mkdir(parents=True, exist_ok=True)
     PNPM_STORE.mkdir(parents=True, exist_ok=True)
+    DEPLOY_ARCHIVE_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def system_node_is_usable() -> bool:
@@ -412,6 +427,76 @@ def health(port: int = DEFAULT_PORT) -> None:
     print(body)
 
 
+def tracked_release_files() -> list[str]:
+    result = subprocess.run(
+        ["git", "ls-files", "-z"],
+        cwd=str(REPO_DIR),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=True,
+    )
+    files = [os.fsdecode(item) for item in result.stdout.split(b"\0") if item]
+    release_files: list[str] = []
+    for relative_path in files:
+        normalized = relative_path.replace(os.sep, "/")
+        name = Path(normalized).name
+        if normalized in DEPLOY_ARCHIVE_EXCLUDES:
+            continue
+        if name.startswith(".env") and normalized != ".env.example":
+            continue
+        source = REPO_DIR / relative_path
+        if source.exists() or source.is_symlink():
+            release_files.append(normalized)
+    if not release_files:
+        raise DeployError("No tracked source files were found for the release archive.")
+    return release_files
+
+
+def normalize_release_tarinfo(tarinfo: tarfile.TarInfo) -> tarfile.TarInfo:
+    tarinfo.uid = 0
+    tarinfo.gid = 0
+    tarinfo.uname = "root"
+    tarinfo.gname = "root"
+    return tarinfo
+
+
+def create_release_archive() -> tuple[Path, str, str]:
+    ensure_dirs()
+    release_files = tracked_release_files()
+    timestamp = datetime.now(UTC).strftime("%Y%m%d%H%M%S%f")
+    revision = command_output(["git", "-C", str(REPO_DIR), "rev-parse", "--short", "HEAD"]) or "nogit"
+    release_id = f"{timestamp}-{revision}"
+    archive_path = DEPLOY_ARCHIVE_DIR / f"openmaic-{release_id}.tar.gz"
+
+    info(f"Creating source release archive with {len(release_files)} tracked files")
+    with tarfile.open(archive_path, "w:gz") as archive:
+        for relative_path in release_files:
+            archive.add(
+                REPO_DIR / relative_path,
+                arcname=relative_path,
+                recursive=False,
+                filter=normalize_release_tarinfo,
+            )
+
+    digest_hash = hashlib.sha256()
+    with archive_path.open("rb") as archive_file:
+        for chunk in iter(lambda: archive_file.read(1024 * 1024), b""):
+            digest_hash.update(chunk)
+    digest = digest_hash.hexdigest()
+    info(f"Release archive: {archive_path}")
+    info(f"SHA-256: {digest}")
+    return archive_path, release_id, digest
+
+
+def validate_local_build() -> None:
+    ensure_node()
+    ensure_pnpm()
+    env = base_env()
+    env["NODE_ENV"] = "production"
+    run(pnpm_cmd() + ["build"], cwd=REPO_DIR, env=env)
+    info("Local production build validation complete.")
+
+
 def require_paramiko():
     try:
         import paramiko  # type: ignore
@@ -428,6 +513,9 @@ def ssh_connect(server: dict):
         "hostname": server["host"],
         "port": int(server.get("port", 22)),
         "username": server["username"],
+        "timeout": 60,  # 增加超时时间到 60 秒
+        "banner_timeout": 60,  # SSH banner 超时时间
+        "auth_timeout": 60,  # 认证超时时间
     }
     if server.get("key_path"):
         kwargs["key_filename"] = server["key_path"]
@@ -468,49 +556,51 @@ def shell_quote(value: str | int) -> str:
     return shlex.quote(str(value))
 
 
-def remote_node_arch_cmd(node_version: str) -> str:
-    return f"""
-set -euo pipefail
-ARCH="$(uname -m)"
-case "$ARCH" in
-  x86_64|amd64) NODE_ARCH="linux-x64" ;;
-  aarch64|arm64) NODE_ARCH="linux-arm64" ;;
-  *) echo "Unsupported Linux architecture: $ARCH" >&2; exit 1 ;;
-esac
-echo "node-v{node_version}-$NODE_ARCH"
-"""
-
-
-def remote_install_script(deploy: dict) -> str:
+def remote_install_script(
+    deploy: dict,
+    release_id: str,
+    remote_archive_path: str,
+    archive_sha256: str,
+) -> str:
     remote_app_dir = deploy["remote_app_dir"]
+    remote_releases_dir = deploy["remote_releases_dir"]
     service_name = deploy["service_name"]
     port = int(deploy.get("port", DEFAULT_PORT))
     hostname = deploy.get("hostname", "0.0.0.0")
-    repo_url = deploy.get("repo_url", REPO_URL)
-    tag = deploy.get("tag", OPENMAIC_TAG)
     node_version = deploy.get("node_version", NODE_VERSION)
     pnpm_version = deploy.get("pnpm_version", PNPM_VERSION)
+    npm_registry = str(deploy.get("npm_registry", DEFAULT_NPM_REGISTRY)).rstrip("/")
+    node_mirror = str(deploy.get("node_mirror", DEFAULT_NODE_MIRROR)).rstrip("/")
+    binary_mirror = str(deploy.get("binary_mirror", DEFAULT_BINARY_MIRROR)).rstrip("/")
+    release_keep = int(deploy.get("release_keep", DEFAULT_RELEASE_KEEP))
 
     return f"""
 set -euo pipefail
 
 REMOTE_APP_DIR={shell_quote(remote_app_dir)}
-REPO_DIR="$REMOTE_APP_DIR/OpenMAIC"
+RELEASES_DIR={shell_quote(remote_releases_dir)}
+RELEASE_ID={shell_quote(release_id)}
+RELEASE_DIR="$RELEASES_DIR/$RELEASE_ID"
+CURRENT_LINK="$REMOTE_APP_DIR/current"
+ARCHIVE_PATH={shell_quote(remote_archive_path)}
+ARCHIVE_SHA256={shell_quote(archive_sha256)}
 RUNTIME_DIR="$REMOTE_APP_DIR/.runtime"
 NODE_VERSION={shell_quote(node_version)}
 PNPM_VERSION={shell_quote(pnpm_version)}
-REPO_URL={shell_quote(repo_url)}
-OPENMAIC_TAG={shell_quote(tag)}
+NPM_REGISTRY={shell_quote(npm_registry)}
+NODE_MIRROR={shell_quote(node_mirror)}
+BINARY_MIRROR={shell_quote(binary_mirror)}
+RELEASE_KEEP={shell_quote(release_keep)}
 PORT={shell_quote(port)}
 HOSTNAME_VALUE={shell_quote(hostname)}
 SERVICE_NAME={shell_quote(service_name)}
 
 export DEBIAN_FRONTEND=noninteractive
-mkdir -p "$REMOTE_APP_DIR" "$RUNTIME_DIR"
+mkdir -p "$REMOTE_APP_DIR" "$RELEASES_DIR" "$RUNTIME_DIR"
 
 if command -v apt-get >/dev/null 2>&1; then
   apt-get update -y
-  apt-get install -y git curl ca-certificates xz-utils build-essential python3
+  apt-get install -y curl ca-certificates xz-utils build-essential python3
 fi
 
 ARCH="$(uname -m)"
@@ -524,7 +614,7 @@ NODE_DIR="$RUNTIME_DIR/node"
 NODE_BIN="$NODE_DIR/bin/node"
 if [ ! -x "$NODE_BIN" ]; then
   NODE_TARBALL="node-v$NODE_VERSION-$NODE_ARCH.tar.xz"
-  NODE_URL="https://nodejs.org/dist/v$NODE_VERSION/$NODE_TARBALL"
+  NODE_URL="$NODE_MIRROR/v$NODE_VERSION/$NODE_TARBALL"
   TMP_TARBALL="/tmp/$NODE_TARBALL"
   echo "Downloading $NODE_URL"
   curl -fsSL "$NODE_URL" -o "$TMP_TARBALL"
@@ -539,35 +629,38 @@ export PATH="$PNPM_GLOBAL_DIR/bin:$NODE_DIR/bin:$PATH"
 export COREPACK_HOME="$RUNTIME_DIR/corepack"
 export PNPM_HOME="$RUNTIME_DIR/pnpm-home"
 export PNPM_STORE_PATH="$RUNTIME_DIR/pnpm-store"
+export npm_config_registry="$NPM_REGISTRY"
+export npm_config_disturl="$NODE_MIRROR"
+export npm_config_nodejs_org_mirror="$NODE_MIRROR"
+export npm_config_sharp_binary_host="$BINARY_MIRROR/sharp"
+export npm_config_sharp_libvips_binary_host="$BINARY_MIRROR/sharp-libvips"
+export npm_config_canvas_binary_host="$BINARY_MIRROR/node-canvas-prebuilt"
+export SHARP_DIST_BASE_URL="$BINARY_MIRROR/sharp-libvips"
 mkdir -p "$COREPACK_HOME" "$PNPM_HOME" "$PNPM_STORE_PATH" "$PNPM_GLOBAL_DIR"
 
 node -v
-npm install -g "pnpm@$PNPM_VERSION" --prefix "$PNPM_GLOBAL_DIR"
+npm install -g "pnpm@$PNPM_VERSION" --prefix "$PNPM_GLOBAL_DIR" --registry "$NPM_REGISTRY"
 pnpm --version
+pnpm config set registry "$NPM_REGISTRY"
 
-if [ ! -d "$REPO_DIR/.git" ]; then
-  rm -rf "$REPO_DIR"
-  git clone "$REPO_URL" "$REPO_DIR"
-fi
-
-cd "$REPO_DIR"
-git remote set-url origin "$REPO_URL"
-if [ -n "$(git status --short)" ]; then
-  echo "Remote OpenMAIC worktree has local changes:" >&2
-  git status --short >&2
+echo "$ARCHIVE_SHA256  $ARCHIVE_PATH" | sha256sum --check -
+if [ -e "$RELEASE_DIR" ]; then
+  echo "Release directory already exists: $RELEASE_DIR" >&2
   exit 1
 fi
-git fetch --tags origin
-git checkout "$OPENMAIC_TAG"
+mkdir -p "$RELEASE_DIR"
+tar -xzf "$ARCHIVE_PATH" -C "$RELEASE_DIR"
 
-if [ ! -f ".env.local" ]; then
-  cp .env.example .env.local
-fi
 if [ -f "$REMOTE_APP_DIR/.env.local.upload" ]; then
-  cp "$REMOTE_APP_DIR/.env.local.upload" ".env.local"
+  cp "$REMOTE_APP_DIR/.env.local.upload" "$RELEASE_DIR/.env.local"
+elif [ -f "$CURRENT_LINK/.env.local" ]; then
+  cp "$CURRENT_LINK/.env.local" "$RELEASE_DIR/.env.local"
+elif [ -f "$RELEASE_DIR/.env.example" ]; then
+  cp "$RELEASE_DIR/.env.example" "$RELEASE_DIR/.env.local"
 fi
 
-pnpm install --frozen-lockfile --store-dir "$PNPM_STORE_PATH"
+cd "$RELEASE_DIR"
+pnpm install --frozen-lockfile --store-dir "$PNPM_STORE_PATH" --registry "$NPM_REGISTRY"
 pnpm build
 
 cat > "/etc/systemd/system/$SERVICE_NAME.service" <<EOF
@@ -577,7 +670,7 @@ After=network.target
 
 [Service]
 Type=simple
-WorkingDirectory=$REPO_DIR
+WorkingDirectory=$CURRENT_LINK
 Environment=NODE_ENV=production
 Environment=PORT=$PORT
 Environment=HOSTNAME=$HOSTNAME_VALUE
@@ -595,19 +688,38 @@ StandardError=append:$RUNTIME_DIR/openmaic.log
 WantedBy=multi-user.target
 EOF
 
+PREVIOUS_RELEASE="$(readlink -f "$CURRENT_LINK" 2>/dev/null || true)"
+ln -sfn "$RELEASE_DIR" "$CURRENT_LINK"
 systemctl daemon-reload
 systemctl enable "$SERVICE_NAME"
 systemctl restart "$SERVICE_NAME"
 
 for i in $(seq 1 60); do
-  if curl -fsS "http://127.0.0.1:$PORT/api/health"; then
-    echo
+  echo "Health check attempt $i/60: http://127.0.0.1:$PORT/api/health"
+  if curl -fsS --max-time 3 "http://127.0.0.1:$PORT/api/health" >/dev/null 2>&1; then
+    echo "OpenMAIC is healthy after attempt $i/60."
+    rm -f "$ARCHIVE_PATH"
+    find "$RELEASES_DIR" -mindepth 1 -maxdepth 1 -type d -printf '%T@ %p\\n' \
+      | sort -rn \
+      | awk -v keep="$RELEASE_KEEP" 'NR > keep {{sub(/^[^ ]+ /, ""); print}}' \
+      | while IFS= read -r old_release; do
+          [ "$(readlink -f "$CURRENT_LINK")" = "$old_release" ] || rm -rf "$old_release"
+        done
     exit 0
   fi
+  echo "OpenMAIC is not ready yet; retrying in 2 seconds."
   sleep 2
 done
 
-echo "OpenMAIC did not become healthy" >&2
+echo "OpenMAIC did not become healthy after 60 attempts." >&2
+if [ -n "$PREVIOUS_RELEASE" ] && [ -d "$PREVIOUS_RELEASE" ]; then
+  echo "Rolling back to $PREVIOUS_RELEASE" >&2
+  ln -sfn "$PREVIOUS_RELEASE" "$CURRENT_LINK"
+  systemctl restart "$SERVICE_NAME" || true
+else
+  rm -f "$CURRENT_LINK"
+  systemctl stop "$SERVICE_NAME" || true
+fi
 systemctl status "$SERVICE_NAME" --no-pager || true
 journalctl -u "$SERVICE_NAME" -n 80 --no-pager || true
 exit 1
@@ -636,10 +748,21 @@ def remote_upload_env(ssh, sftp, deploy: dict, local_env_path: Path | None) -> N
     sftp.put(str(local_env_path), staging_env_path)
 
 
-def remote_deploy(config_path: Path = DEPLOY_TOML_PATH, upload_env: bool = False) -> None:
+def remote_deploy(
+    config_path: Path = DEPLOY_TOML_PATH,
+    upload_env: bool = False,
+    skip_local_build: bool = False,
+) -> None:
     config = load_remote_config(config_path)
     server = config["server"]
     deploy = config["deploy"]
+    if not skip_local_build:
+        validate_local_build()
+    else:
+        info("Skipping local production build validation.")
+    archive_path, release_id, archive_sha256 = create_release_archive()
+    remote_upload_dir = f"{deploy['remote_app_dir']}/uploads"
+    remote_archive_path = f"{remote_upload_dir}/{archive_path.name}"
     info(
         f"Remote target: {server['username']}@{server['host']}:{server.get('port', 22)} "
         f"-> {deploy['remote_app_dir']}"
@@ -654,13 +777,20 @@ def remote_deploy(config_path: Path = DEPLOY_TOML_PATH, upload_env: bool = False
             "uname -a && (command -v lsb_release >/dev/null 2>&1 && lsb_release -a || true)",
             "Remote system info",
         )
+        remote_exec(
+            ssh,
+            f"mkdir -p {shell_quote(remote_upload_dir)}",
+            "Prepare remote release upload dir",
+        )
+        info(f"Uploading release: {archive_path} -> {remote_archive_path}")
+        sftp.put(str(archive_path), remote_archive_path)
         if upload_env:
             local_env = resolve_local_env_path(str(deploy.get("local_env_path", "")))
             remote_upload_env(ssh, sftp, deploy, local_env)
         else:
             info("Skipping env upload. Use --upload-env to sync local .env.local to remote.")
 
-        script = remote_install_script(deploy)
+        script = remote_install_script(deploy, release_id, remote_archive_path, archive_sha256)
         remote_exec(ssh, "bash -s", "Remote install/build/restart", input_data=script)
     finally:
         if sftp:
@@ -684,7 +814,12 @@ def main() -> int:
     parser.add_argument(
         "--upload-env",
         action="store_true",
-        help="upload local env file to remote OpenMAIC/.env.local before building",
+        help="upload the configured local env file into the new remote release",
+    )
+    parser.add_argument(
+        "--skip-local-build",
+        action="store_true",
+        help="skip local pnpm build validation before creating the source archive",
     )
     args = parser.parse_args()
 
@@ -700,7 +835,11 @@ def main() -> int:
         elif args.command == "health":
             health(args.port)
         elif args.command == "remote-deploy":
-            remote_deploy(args.config, upload_env=args.upload_env)
+            remote_deploy(
+                args.config,
+                upload_env=args.upload_env,
+                skip_local_build=args.skip_local_build,
+            )
         return 0
     except subprocess.CalledProcessError as exc:
         if exc.stdout:

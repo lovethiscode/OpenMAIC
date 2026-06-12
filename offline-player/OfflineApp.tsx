@@ -14,6 +14,7 @@ import { SceneProvider } from '@/lib/contexts/scene-context';
 import { useCanvasStore } from '@/lib/store/canvas';
 import type { Action } from '@/lib/types/action';
 import type { SceneContent } from '@/lib/types/stage';
+import { OfflineInteractiveView } from './OfflineInteractiveView';
 import { OfflineQuizView } from './OfflineQuizView';
 import { OfflineSlideCanvas } from './OfflineSlideCanvas';
 import type { OfflineClassroom, OfflineScene } from './types';
@@ -22,16 +23,6 @@ type PlaybackState = 'idle' | 'playing' | 'paused';
 const PLAYBACK_RATES = [0.75, 1, 1.25, 1.5, 2] as const;
 const CONTROL_HIDE_DELAY_MS = 2600;
 let sharedSpeechAudio: HTMLAudioElement | null = null;
-
-function getTitle(classroom: OfflineClassroom): string {
-  return (
-    classroom.name ||
-    classroom.title ||
-    classroom.stage?.name ||
-    classroom.stage?.title ||
-    'OpenMAIC Offline Classroom'
-  );
-}
 
 function getSpeechAudioSrc(action: Action): string | undefined {
   if (action.type !== 'speech') return undefined;
@@ -153,6 +144,16 @@ export function OfflineApp({ classroom }: { readonly classroom: OfflineClassroom
   }, [clearControlsHideTimer]);
 
   useEffect(() => clearControlsHideTimer, [clearControlsHideTimer]);
+
+  useEffect(() => {
+    const handleInteractiveActivity = (event: MessageEvent) => {
+      if (event.data?.type === 'openmaic-interactive-activity') {
+        showControls();
+      }
+    };
+    window.addEventListener('message', handleInteractiveActivity);
+    return () => window.removeEventListener('message', handleInteractiveActivity);
+  }, [showControls]);
 
   const clearScenePlaybackState = useCallback(() => {
     useCanvasStore.getState().clearAllEffects();
@@ -420,12 +421,6 @@ export function OfflineApp({ classroom }: { readonly classroom: OfflineClassroom
 
   return (
     <div className="omaic-app">
-      <header className="omaic-topbar">
-        <div>
-          <div className="omaic-title">{getTitle(classroom)}</div>
-        </div>
-      </header>
-
       <main
         className="omaic-stage"
         onClick={handleStageClick}
@@ -438,6 +433,13 @@ export function OfflineApp({ classroom }: { readonly classroom: OfflineClassroom
           </SceneProvider>
         ) : currentScene.content.type === 'quiz' ? (
           <OfflineQuizView questions={currentScene.content.questions} title={currentScene.title} />
+        ) : currentScene.content.type === 'interactive' ? (
+          <OfflineInteractiveView content={currentScene.content} title={currentScene.title} />
+        ) : currentScene.content.type === 'error' ? (
+          <div className="omaic-unsupported-scene">
+            <strong>{currentScene.title || 'Scene load error'}</strong>
+            <span>{currentScene.content.message}</span>
+          </div>
         ) : (
           <div className="omaic-unsupported-scene">
             <strong>{currentScene.title || 'Unsupported scene'}</strong>

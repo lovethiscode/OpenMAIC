@@ -6,13 +6,17 @@ can run on a fresh machine without installing requests/httpx.
 
 Example:
     python3 test_openmaic_api.py
+    ACCESS_CODE=your-code python3 test_openmaic_api.py
+    python3 test_openmaic_api.py --access-code your-code
     python3 test_openmaic_api.py --base-url http://localhost:3000 --timeout 900
 """
 
 from __future__ import annotations
 
 import argparse
+import http.cookiejar
 import json
+import os
 import sys
 import time
 import urllib.error
@@ -23,6 +27,7 @@ from typing import Any
 
 
 DEFAULT_BASE_URL = "http://localhost:3000"
+DEFAULT_ACCESS_CODE = os.environ.get("ACCESS_CODE", "")
 
 
 @dataclass
@@ -32,6 +37,7 @@ class ApiResponse:
 
 
 def request_json(
+    opener: urllib.request.OpenerDirector,
     method: str,
     url: str,
     payload: dict[str, Any] | None = None,
@@ -44,7 +50,7 @@ def request_json(
 
     req = urllib.request.Request(url, data=body, headers=headers, method=method)
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with opener.open(req, timeout=timeout) as resp:
             raw = resp.read().decode("utf-8", errors="replace")
             return ApiResponse(resp.status, json.loads(raw))
     except urllib.error.HTTPError as exc:
@@ -61,15 +67,48 @@ def print_json(label: str, data: dict[str, Any]) -> None:
     print(json.dumps(data, ensure_ascii=False, indent=2), flush=True)
 
 
-def health_check(base_url: str) -> dict[str, Any]:
-    resp = request_json("GET", f"{base_url}/api/health")
+def health_check(opener: urllib.request.OpenerDirector, base_url: str) -> dict[str, Any]:
+    resp = request_json(opener, "GET", f"{base_url}/api/health")
     print_json("Health", resp.data)
     if resp.status != 200 or not resp.data.get("success") or resp.data.get("status") != "ok":
         raise RuntimeError(f"OpenMAIC health check failed: HTTP {resp.status}")
     return resp.data
 
 
-def submit_generation(base_url: str, requirement: str) -> dict[str, Any]:
+def authenticate_access(
+    opener: urllib.request.OpenerDirector,
+    base_url: str,
+    access_code: str,
+) -> None:
+    status_resp = request_json(opener, "GET", f"{base_url}/api/access-code/status")
+    if status_resp.status != 200 or not status_resp.data.get("success"):
+        raise RuntimeError(f"Access-code status check failed: HTTP {status_resp.status}")
+
+    if not status_resp.data.get("enabled"):
+        print("\n[access] ACCESS_CODE is not enabled on the server.", flush=True)
+        return
+    if not access_code:
+        raise RuntimeError(
+            "Server requires ACCESS_CODE. Set the ACCESS_CODE environment variable "
+            "or pass --access-code."
+        )
+
+    verify_resp = request_json(
+        opener,
+        "POST",
+        f"{base_url}/api/access-code/verify",
+        {"code": access_code},
+    )
+    if verify_resp.status != 200 or not verify_resp.data.get("success"):
+        raise RuntimeError(f"ACCESS_CODE verification failed: HTTP {verify_resp.status}")
+    print("\n[access] ACCESS_CODE verified.", flush=True)
+
+
+def submit_generation(
+    opener: urllib.request.OpenerDirector,
+    base_url: str,
+    requirement: str,
+) -> dict[str, Any]:
     payload = {
         "requirement": requirement,
         # Enable TTS, image generation and video generation for verification
@@ -79,7 +118,7 @@ def submit_generation(base_url: str, requirement: str) -> dict[str, Any]:
         "enableTTS": True,
         "agentMode": "default",
     }
-    resp = request_json("POST", f"{base_url}/api/generate-classroom", payload, timeout=60)
+    resp = request_json(opener, "POST", f"{base_url}/api/generate-classroom", payload, timeout=60)
     print_json("Submit Generation", resp.data)
     if resp.status != 202 or not resp.data.get("success"):
         raise RuntimeError(f"Generation submission failed: HTTP {resp.status}")
@@ -87,6 +126,7 @@ def submit_generation(base_url: str, requirement: str) -> dict[str, Any]:
 
 
 def poll_job(
+    opener: urllib.request.OpenerDirector,
     poll_url: str,
     timeout_seconds: int,
     poll_interval_seconds: int,
@@ -95,7 +135,7 @@ def poll_job(
     last_signature: tuple[Any, Any, Any, Any] | None = None
 
     while time.time() < deadline:
-        resp = request_json("GET", poll_url, timeout=60)
+        resp = request_json(opener, "GET", poll_url, timeout=60)
         if resp.status != 200 or not resp.data.get("success"):
             print_json("Poll Error", resp.data)
             time.sleep(poll_interval_seconds)
@@ -129,9 +169,13 @@ def poll_job(
     raise TimeoutError(f"Timed out waiting for OpenMAIC job after {timeout_seconds}s")
 
 
-def fetch_classroom(base_url: str, classroom_id: str) -> dict[str, Any]:
+def fetch_classroom(
+    opener: urllib.request.OpenerDirector,
+    base_url: str,
+    classroom_id: str,
+) -> dict[str, Any]:
     query = urllib.parse.urlencode({"id": classroom_id})
-    resp = request_json("GET", f"{base_url}/api/classroom?{query}", timeout=60)
+    resp = request_json(opener, "GET", f"{base_url}/api/classroom?{query}", timeout=60)
     print_json("Classroom", resp.data)
     if resp.status != 200 or not resp.data.get("success"):
         raise RuntimeError(f"Classroom fetch failed: HTTP {resp.status}")
@@ -141,6 +185,11 @@ def fetch_classroom(base_url: str, classroom_id: str) -> dict[str, Any]:
 def main() -> int:
     parser = argparse.ArgumentParser(description="Test OpenMAIC API classroom generation flow.")
     parser.add_argument("--base-url", default=DEFAULT_BASE_URL, help="OpenMAIC base URL")
+    parser.add_argument(
+        "--access-code",
+        default=DEFAULT_ACCESS_CODE,
+        help="OpenMAIC ACCESS_CODE (default: ACCESS_CODE environment variable)",
+    )
     parser.add_argument("--timeout", type=int, default=600, help="Max seconds to wait for job")
     parser.add_argument("--poll-interval", type=int, default=10, help="Polling interval seconds")
     parser.add_argument(
@@ -162,15 +211,18 @@ def main() -> int:
     args = parser.parse_args()
 
     base_url = args.base_url.rstrip("/")
+    cookie_jar = http.cookiejar.CookieJar()
+    opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(cookie_jar))
     try:
-        health_check(base_url)
-        submitted = submit_generation(base_url, args.requirement)
+        health_check(opener, base_url)
+        authenticate_access(opener, base_url, args.access_code)
+        submitted = submit_generation(opener, base_url, args.requirement)
         poll_url = submitted.get("pollUrl")
         if not poll_url:
             job_id = submitted["jobId"]
             poll_url = f"{base_url}/api/generate-classroom/{job_id}"
 
-        final_job = poll_job(poll_url, args.timeout, args.poll_interval)
+        final_job = poll_job(opener, poll_url, args.timeout, args.poll_interval)
         if final_job.get("status") != "succeeded":
             print(f"\nGeneration failed: {final_job.get('error')}", file=sys.stderr, flush=True)
             return 2
@@ -184,7 +236,7 @@ def main() -> int:
             raise RuntimeError("Succeeded job did not return result.classroomId")
 
         if args.fetch_classroom or local_classroom_available:
-            fetch_classroom(base_url, classroom_id)
+            fetch_classroom(opener, base_url, classroom_id)
 
         print("\n=== Success ===", flush=True)
         print(f"Classroom ID: {classroom_id}", flush=True)

@@ -8,11 +8,11 @@
   </head>
   <body>
     <div id="openmaic-offline-root"></div>
-    <script id="openmaic-course-data" type="application/json">{{COURSE_JSON}}</script>
     <script>
       window.process = window.process || { env: { NODE_ENV: 'production' } };
       window.process.env = window.process.env || { NODE_ENV: 'production' };
     </script>
+    <script src="./manifest.js"></script>
     <script src="./offline-player.js"></script>
   </body>
 </html>

@@ -49821,6 +49821,13 @@
 	    return true;
 	}
 
+	function OfflineInteractiveView({ content, title }) {
+	    if (!content.offlineSrc) {
+	        return (jsxRuntimeExports.jsxs("div", { className: "omaic-unsupported-scene", children: [jsxRuntimeExports.jsx("strong", { children: title || 'Interactive scene' }), jsxRuntimeExports.jsx("span", { children: "This interactive scene was not packaged for offline playback." })] }));
+	    }
+	    return (jsxRuntimeExports.jsx("iframe", { className: "omaic-interactive-frame", src: content.offlineSrc, sandbox: "allow-scripts allow-forms allow-modals allow-downloads", title: title || 'Interactive scene' }));
+	}
+
 	function isChoiceQuestion(question) {
 	    return question.type === 'single' || question.type === 'multiple';
 	}
@@ -63241,14 +63248,6 @@
 	const PLAYBACK_RATES = [0.75, 1, 1.25, 1.5, 2];
 	const CONTROL_HIDE_DELAY_MS = 2600;
 	let sharedSpeechAudio = null;
-	function getTitle(classroom) {
-	    var _a, _b;
-	    return (classroom.name ||
-	        classroom.title ||
-	        ((_a = classroom.stage) === null || _a === void 0 ? void 0 : _a.name) ||
-	        ((_b = classroom.stage) === null || _b === void 0 ? void 0 : _b.title) ||
-	        'OpenMAIC Offline Classroom');
-	}
 	function getSpeechAudioSrc(action) {
 	    if (action.type !== 'speech')
 	        return undefined;
@@ -63349,6 +63348,16 @@
 	        }
 	    }, [clearControlsHideTimer]);
 	    reactExports.useEffect(() => clearControlsHideTimer, [clearControlsHideTimer]);
+	    reactExports.useEffect(() => {
+	        const handleInteractiveActivity = (event) => {
+	            var _a;
+	            if (((_a = event.data) === null || _a === void 0 ? void 0 : _a.type) === 'openmaic-interactive-activity') {
+	                showControls();
+	            }
+	        };
+	        window.addEventListener('message', handleInteractiveActivity);
+	        return () => window.removeEventListener('message', handleInteractiveActivity);
+	    }, [showControls]);
 	    const clearScenePlaybackState = reactExports.useCallback(() => {
 	        useCanvasStore.getState().clearAllEffects();
 	        useCanvasStore.getState().pauseVideo();
@@ -63587,7 +63596,7 @@
 	    if (!currentScene) {
 	        return jsxRuntimeExports.jsx("div", { className: "omaic-empty", children: "No classroom scenes found." });
 	    }
-	    return (jsxRuntimeExports.jsxs("div", { className: "omaic-app", children: [jsxRuntimeExports.jsx("header", { className: "omaic-topbar", children: jsxRuntimeExports.jsx("div", { children: jsxRuntimeExports.jsx("div", { className: "omaic-title", children: getTitle(classroom) }) }) }), jsxRuntimeExports.jsxs("main", { className: "omaic-stage", onClick: handleStageClick, onMouseMove: showControls, onTouchStart: showControls, children: [currentScene.content.type === 'slide' ? (jsxRuntimeExports.jsx(SceneProvider, { controller: controller, children: jsxRuntimeExports.jsx(OfflineSlideCanvas, {}) })) : currentScene.content.type === 'quiz' ? (jsxRuntimeExports.jsx(OfflineQuizView, { questions: currentScene.content.questions, title: currentScene.title })) : (jsxRuntimeExports.jsxs("div", { className: "omaic-unsupported-scene", children: [jsxRuntimeExports.jsx("strong", { children: currentScene.title || 'Unsupported scene' }), jsxRuntimeExports.jsxs("span", { children: [currentScene.type, " scenes are not supported by the offline player yet."] })] })), playbackState === 'paused' && (jsxRuntimeExports.jsx("div", { className: "omaic-stage-play-overlay", "aria-hidden": "true", children: jsxRuntimeExports.jsx("div", { className: "omaic-stage-play-button", children: jsxRuntimeExports.jsx(Play, { "aria-hidden": "true" }) }) })), jsxRuntimeExports.jsxs("div", { className: `omaic-controls${controlsVisible ? '' : ' omaic-controls-hidden'}`, "aria-label": "Playback controls", onClick: (event) => event.stopPropagation(), children: [jsxRuntimeExports.jsxs("div", { className: "omaic-scene-count", "aria-label": `Scene ${sceneIndex + 1} of ${scenes.length}`, children: [sceneIndex + 1, jsxRuntimeExports.jsx("span", { children: "/" }), scenes.length] }), jsxRuntimeExports.jsx("div", { className: "omaic-control-divider" }), jsxRuntimeExports.jsx("button", { type: "button", className: "omaic-icon-button", onClick: () => goToScene(sceneIndex - 1), disabled: sceneIndex === 0, "aria-label": "Previous scene", title: "Previous scene", children: jsxRuntimeExports.jsx(ChevronLeft, { "aria-hidden": "true" }) }), playbackState === 'playing' ? (jsxRuntimeExports.jsx("button", { type: "button", className: "omaic-icon-button omaic-icon-button-active", onClick: pausePlayback, "aria-label": "Pause", title: "Pause", children: jsxRuntimeExports.jsx(Pause, { "aria-hidden": "true" }) })) : (jsxRuntimeExports.jsx("button", { type: "button", className: "omaic-icon-button", onClick: playbackState === 'paused' ? resumePlayback : playFromCurrentScene, "aria-label": "Play", title: "Play", children: jsxRuntimeExports.jsx(Play, { "aria-hidden": "true", className: "omaic-play-icon" }) })), jsxRuntimeExports.jsx("button", { type: "button", className: "omaic-icon-button", onClick: stopPlayback, "aria-label": "Stop", title: "Stop", children: jsxRuntimeExports.jsx(Square, { "aria-hidden": "true" }) }), jsxRuntimeExports.jsxs("button", { type: "button", className: `omaic-speed-button${playbackRate !== 1 ? ' omaic-speed-button-active' : ''}`, onClick: cyclePlaybackRate, "aria-label": `Playback speed ${playbackRate}x`, title: "Playback speed", children: [playbackRate, "x"] }), jsxRuntimeExports.jsx("button", { type: "button", className: `omaic-icon-button${captionsEnabled ? ' omaic-icon-button-active' : ''}`, onClick: () => setCaptionsEnabled((value) => !value), "aria-label": captionsEnabled ? 'Hide captions' : 'Show captions', title: captionsEnabled ? 'Hide captions' : 'Show captions', "aria-pressed": captionsEnabled, children: captionsEnabled ? jsxRuntimeExports.jsx(Captions, { "aria-hidden": "true" }) : jsxRuntimeExports.jsx(CaptionsOff, { "aria-hidden": "true" }) }), jsxRuntimeExports.jsx("button", { type: "button", className: `omaic-icon-button${muted ? ' omaic-icon-button-muted' : ''}`, onClick: () => setMuted((value) => {
+	    return (jsxRuntimeExports.jsxs("div", { className: "omaic-app", children: [jsxRuntimeExports.jsxs("main", { className: "omaic-stage", onClick: handleStageClick, onMouseMove: showControls, onTouchStart: showControls, children: [currentScene.content.type === 'slide' ? (jsxRuntimeExports.jsx(SceneProvider, { controller: controller, children: jsxRuntimeExports.jsx(OfflineSlideCanvas, {}) })) : currentScene.content.type === 'quiz' ? (jsxRuntimeExports.jsx(OfflineQuizView, { questions: currentScene.content.questions, title: currentScene.title })) : currentScene.content.type === 'interactive' ? (jsxRuntimeExports.jsx(OfflineInteractiveView, { content: currentScene.content, title: currentScene.title })) : currentScene.content.type === 'error' ? (jsxRuntimeExports.jsxs("div", { className: "omaic-unsupported-scene", children: [jsxRuntimeExports.jsx("strong", { children: currentScene.title || 'Scene load error' }), jsxRuntimeExports.jsx("span", { children: currentScene.content.message })] })) : (jsxRuntimeExports.jsxs("div", { className: "omaic-unsupported-scene", children: [jsxRuntimeExports.jsx("strong", { children: currentScene.title || 'Unsupported scene' }), jsxRuntimeExports.jsxs("span", { children: [currentScene.type, " scenes are not supported by the offline player yet."] })] })), playbackState === 'paused' && (jsxRuntimeExports.jsx("div", { className: "omaic-stage-play-overlay", "aria-hidden": "true", children: jsxRuntimeExports.jsx("div", { className: "omaic-stage-play-button", children: jsxRuntimeExports.jsx(Play, { "aria-hidden": "true" }) }) })), jsxRuntimeExports.jsxs("div", { className: `omaic-controls${controlsVisible ? '' : ' omaic-controls-hidden'}`, "aria-label": "Playback controls", onClick: (event) => event.stopPropagation(), children: [jsxRuntimeExports.jsxs("div", { className: "omaic-scene-count", "aria-label": `Scene ${sceneIndex + 1} of ${scenes.length}`, children: [sceneIndex + 1, jsxRuntimeExports.jsx("span", { children: "/" }), scenes.length] }), jsxRuntimeExports.jsx("div", { className: "omaic-control-divider" }), jsxRuntimeExports.jsx("button", { type: "button", className: "omaic-icon-button", onClick: () => goToScene(sceneIndex - 1), disabled: sceneIndex === 0, "aria-label": "Previous scene", title: "Previous scene", children: jsxRuntimeExports.jsx(ChevronLeft, { "aria-hidden": "true" }) }), playbackState === 'playing' ? (jsxRuntimeExports.jsx("button", { type: "button", className: "omaic-icon-button omaic-icon-button-active", onClick: pausePlayback, "aria-label": "Pause", title: "Pause", children: jsxRuntimeExports.jsx(Pause, { "aria-hidden": "true" }) })) : (jsxRuntimeExports.jsx("button", { type: "button", className: "omaic-icon-button", onClick: playbackState === 'paused' ? resumePlayback : playFromCurrentScene, "aria-label": "Play", title: "Play", children: jsxRuntimeExports.jsx(Play, { "aria-hidden": "true", className: "omaic-play-icon" }) })), jsxRuntimeExports.jsx("button", { type: "button", className: "omaic-icon-button", onClick: stopPlayback, "aria-label": "Stop", title: "Stop", children: jsxRuntimeExports.jsx(Square, { "aria-hidden": "true" }) }), jsxRuntimeExports.jsxs("button", { type: "button", className: `omaic-speed-button${playbackRate !== 1 ? ' omaic-speed-button-active' : ''}`, onClick: cyclePlaybackRate, "aria-label": `Playback speed ${playbackRate}x`, title: "Playback speed", children: [playbackRate, "x"] }), jsxRuntimeExports.jsx("button", { type: "button", className: `omaic-icon-button${captionsEnabled ? ' omaic-icon-button-active' : ''}`, onClick: () => setCaptionsEnabled((value) => !value), "aria-label": captionsEnabled ? 'Hide captions' : 'Show captions', title: captionsEnabled ? 'Hide captions' : 'Show captions', "aria-pressed": captionsEnabled, children: captionsEnabled ? jsxRuntimeExports.jsx(Captions, { "aria-hidden": "true" }) : jsxRuntimeExports.jsx(CaptionsOff, { "aria-hidden": "true" }) }), jsxRuntimeExports.jsx("button", { type: "button", className: `omaic-icon-button${muted ? ' omaic-icon-button-muted' : ''}`, onClick: () => setMuted((value) => {
 	                                    const nextMuted = !value;
 	                                    mutedRef.current = nextMuted;
 	                                    return nextMuted;
@@ -63600,15 +63609,97 @@
 	        return globalData;
 	    const script = document.getElementById('openmaic-course-data');
 	    if (!(script === null || script === void 0 ? void 0 : script.textContent)) {
-	        throw new Error('Missing inline OpenMAIC course data');
+	        return null;
 	    }
 	    return JSON.parse(script.textContent);
+	}
+	function loadScript(src) {
+	    return new Promise((resolve, reject) => {
+	        const existing = document.querySelector(`script[data-offline-src="${src}"]`);
+	        if ((existing === null || existing === void 0 ? void 0 : existing.dataset.loaded) === 'true') {
+	            resolve();
+	            return;
+	        }
+	        const script = existing || document.createElement('script');
+	        script.src = src;
+	        script.async = false;
+	        script.dataset.offlineSrc = src;
+	        script.onload = () => {
+	            script.dataset.loaded = 'true';
+	            resolve();
+	        };
+	        script.onerror = () => reject(new Error(`Failed to load offline scene: ${src}`));
+	        if (!existing)
+	            document.head.appendChild(script);
+	    });
+	}
+	function createSceneLoadError(entry, error) {
+	    return {
+	        id: entry.id,
+	        stageId: '',
+	        type: 'slide',
+	        title: entry.title || 'Scene load error',
+	        order: entry.order,
+	        content: {
+	            type: 'error',
+	            message: error instanceof Error ? error.message : 'Failed to load this scene.',
+	        },
+	        actions: [],
+	    };
+	}
+	async function loadManifestCourse(manifest) {
+	    var _a;
+	    const sceneStore = ((_a = window).OPENMAIC_OFFLINE_SCENES || (_a.OPENMAIC_OFFLINE_SCENES = {}));
+	    const scenes = await Promise.all(manifest.scenes
+	        .slice()
+	        .sort((a, b) => a.order - b.order)
+	        .map(async (entry) => {
+	        try {
+	            await loadScript(entry.src);
+	            return sceneStore[entry.id] || createSceneLoadError(entry, 'Scene data was not registered.');
+	        }
+	        catch (error) {
+	            return createSceneLoadError(entry, error);
+	        }
+	    }));
+	    return {
+	        id: manifest.id,
+	        name: manifest.name,
+	        title: manifest.title,
+	        description: manifest.description,
+	        stage: manifest.stage,
+	        scenes,
+	    };
+	}
+	async function loadCourseData() {
+	    const globals = window;
+	    if (globals.OPENMAIC_OFFLINE_MANIFEST) {
+	        return loadManifestCourse(globals.OPENMAIC_OFFLINE_MANIFEST);
+	    }
+	    const inlineCourse = readInlineCourseData();
+	    if (inlineCourse)
+	        return inlineCourse;
+	    throw new Error('Missing offline course manifest.');
+	}
+	function OfflineLoading() {
+	    return jsxRuntimeExports.jsx("div", { className: "omaic-empty", children: "Loading offline classroom..." });
+	}
+	function OfflineFatalError({ error }) {
+	    return (jsxRuntimeExports.jsxs("div", { className: "omaic-empty", children: [jsxRuntimeExports.jsx("strong", { children: "Offline classroom failed to load." }), jsxRuntimeExports.jsx("span", { children: error instanceof Error ? error.message : 'Unknown error' })] }));
 	}
 	const mount = document.getElementById('openmaic-offline-root');
 	if (!mount) {
 	    throw new Error('Missing #openmaic-offline-root');
 	}
-	clientExports.createRoot(mount).render(jsxRuntimeExports.jsx(React.StrictMode, { children: jsxRuntimeExports.jsx(OfflineApp, { classroom: readInlineCourseData() }) }));
+	const root = clientExports.createRoot(mount);
+	root.render(jsxRuntimeExports.jsx(React.StrictMode, { children: jsxRuntimeExports.jsx(OfflineLoading, {}) }));
+	loadCourseData()
+	    .then((classroom) => {
+	    root.render(jsxRuntimeExports.jsx(React.StrictMode, { children: jsxRuntimeExports.jsx(OfflineApp, { classroom: classroom }) }));
+	})
+	    .catch((error) => {
+	    root.render(jsxRuntimeExports.jsx(React.StrictMode, { children: jsxRuntimeExports.jsx(OfflineFatalError, { error: error }) }));
+	});
 
 	var dexie_min$1 = {exports: {}};
 

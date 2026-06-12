@@ -40,31 +40,10 @@ button:disabled {
 
 .omaic-app {
   display: grid;
-  grid-template-rows: 48px 1fr auto;
+  grid-template-rows: 1fr auto;
   width: 100%;
   height: 100%;
   background: #111827;
-}
-
-.omaic-topbar {
-  align-items: center;
-  background: rgba(15, 23, 42, 0.96);
-  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
-  color: #f8fafc;
-  display: flex;
-  justify-content: center;
-  min-width: 0;
-  padding: 8px 16px;
-}
-
-.omaic-title {
-  font-size: 15px;
-  font-weight: 650;
-  max-width: min(760px, calc(100vw - 32px));
-  overflow: hidden;
-  text-align: center;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 .omaic-controls {
@@ -204,6 +183,14 @@ button:disabled {
   min-height: 0;
   overflow: hidden;
   position: relative;
+}
+
+.omaic-interactive-frame {
+  background: #fff;
+  border: 0;
+  display: block;
+  height: 100%;
+  width: 100%;
 }
 
 .omaic-stage-play-overlay {
