@@ -4,6 +4,7 @@
  * Supports multiple AI providers through Vercel AI SDK:
  * - OpenAI (native)
  * - Anthropic Claude (native)
+ * - Amazon Bedrock (native)
  * - Google Gemini (native)
  * - MiniMax (Anthropic-compatible, recommended by official)
  * - OpenAI-compatible providers (DeepSeek, Qwen, Kimi, GLM, SiliconFlow, Doubao, Tencent, Xiaomi, Lemonade, etc.)
@@ -26,8 +27,17 @@
  */
 
 import { createOpenAI } from '@ai-sdk/openai';
+import { createAzure } from '@ai-sdk/azure';
 import { createAnthropic } from '@ai-sdk/anthropic';
+import { createAmazonBedrock } from '@ai-sdk/amazon-bedrock';
 import { createGoogleGenerativeAI } from '@ai-sdk/google';
+import { wrapLanguageModel, extractReasoningMiddleware } from 'ai';
+import {
+  createKimiReasoningPreservationMiddleware,
+  restoreKimiReasoningInRequestBody,
+  wrapJsonResponseWithReasoning,
+  wrapResponseWithReasoning,
+} from './reasoning-sse';
 import type { LanguageModel } from 'ai';
 import type {
   ProviderId,
@@ -37,8 +47,15 @@ import type {
   ThinkingConfig,
 } from '@/lib/types/provider';
 import { applyModelMetadata, getCatalogThinkingCapability } from './model-metadata';
-import { getDefaultThinkingConfig, getThinkingMode, pickThinkingBudget } from './thinking-config';
+import { findModelById } from './model-aliases';
+import {
+  getDefaultThinkingConfig,
+  getThinkingMode,
+  pickThinkingBudget,
+  pickThinkingEffort,
+} from './thinking-config';
 import { createLogger } from '@/lib/logger';
+import { normalizeAzureBaseUrl } from './azure';
 // NOTE: Do NOT import thinking-context.ts here — it uses node:async_hooks
 // which is server-only, and this file is also used on the client via
 // settings.ts. The thinking context is read from globalThis instead
@@ -64,6 +81,54 @@ export const PROVIDERS: Record<ProviderId, ProviderConfig> = {
     requiresApiKey: true,
     icon: '/logos/openai.svg',
     models: [
+      {
+        id: 'gpt-5.6',
+        name: 'GPT-5.6 Sol',
+        contextWindow: 1050000,
+        outputWindow: 128000,
+        capabilities: {
+          streaming: true,
+          tools: true,
+          vision: true,
+          thinking: {
+            toggleable: true,
+            budgetAdjustable: true,
+            defaultEnabled: true,
+          },
+        },
+      },
+      {
+        id: 'gpt-5.6-terra',
+        name: 'GPT-5.6 Terra',
+        contextWindow: 1050000,
+        outputWindow: 128000,
+        capabilities: {
+          streaming: true,
+          tools: true,
+          vision: true,
+          thinking: {
+            toggleable: true,
+            budgetAdjustable: true,
+            defaultEnabled: true,
+          },
+        },
+      },
+      {
+        id: 'gpt-5.6-luna',
+        name: 'GPT-5.6 Luna',
+        contextWindow: 1050000,
+        outputWindow: 128000,
+        capabilities: {
+          streaming: true,
+          tools: true,
+          vision: true,
+          thinking: {
+            toggleable: true,
+            budgetAdjustable: true,
+            defaultEnabled: true,
+          },
+        },
+      },
       {
         id: 'gpt-5.5',
         name: 'GPT-5.5',
@@ -147,6 +212,54 @@ export const PROVIDERS: Record<ProviderId, ProviderConfig> = {
     ],
   },
 
+  azure: {
+    id: 'azure',
+    name: 'Azure OpenAI',
+    type: 'azure',
+    baseUrlPlaceholder: 'https://YOUR-RESOURCE.openai.azure.com/openai',
+    supportsModelDiscovery: false,
+    requiresApiKey: true,
+    icon: '/logos/azure.svg',
+    // Azure requests use user-defined deployment names rather than model IDs.
+    models: [],
+  },
+
+  atlascloud: {
+    id: 'atlascloud',
+    name: 'Atlas Cloud',
+    type: 'openai',
+    defaultBaseUrl: 'https://api.atlascloud.ai/v1',
+    supportsModelDiscovery: true,
+    requiresApiKey: true,
+    models: [
+      {
+        id: 'qwen/qwen3.5-flash',
+        name: 'Qwen3.5 Flash',
+        contextWindow: 1000000,
+        outputWindow: 67072,
+        capabilities: { streaming: true, tools: false, vision: false },
+      },
+      {
+        id: 'deepseek-ai/deepseek-v4-pro',
+        name: 'DeepSeek V4 Pro',
+        contextWindow: 1048576,
+        outputWindow: 393216,
+        // Live-verified with enabled/disabled thinking payloads and a forced
+        // OpenAI-compatible function call against Atlas Cloud.
+        capabilities: {
+          streaming: true,
+          tools: true,
+          vision: false,
+          thinking: {
+            toggleable: true,
+            budgetAdjustable: true,
+            defaultEnabled: true,
+          },
+        },
+      },
+    ],
+  },
+
   anthropic: {
     id: 'anthropic',
     name: 'Claude',
@@ -155,6 +268,54 @@ export const PROVIDERS: Record<ProviderId, ProviderConfig> = {
     defaultBaseUrl: 'https://api.anthropic.com/v1',
     icon: '/logos/claude.svg',
     models: [
+      {
+        id: 'claude-opus-5',
+        name: 'Claude Opus 5',
+        contextWindow: 1000000,
+        outputWindow: 128000,
+        capabilities: {
+          streaming: true,
+          tools: true,
+          vision: true,
+          thinking: {
+            toggleable: true,
+            budgetAdjustable: true,
+            defaultEnabled: true,
+          },
+        },
+      },
+      {
+        id: 'claude-sonnet-5',
+        name: 'Claude Sonnet 5',
+        contextWindow: 1000000,
+        outputWindow: 128000,
+        capabilities: {
+          streaming: true,
+          tools: true,
+          vision: true,
+          thinking: {
+            toggleable: true,
+            budgetAdjustable: true,
+            defaultEnabled: true,
+          },
+        },
+      },
+      {
+        id: 'claude-fable-5',
+        name: 'Claude Fable 5',
+        contextWindow: 1000000,
+        outputWindow: 128000,
+        capabilities: {
+          streaming: true,
+          tools: true,
+          vision: true,
+          thinking: {
+            toggleable: false,
+            budgetAdjustable: false,
+            defaultEnabled: true,
+          },
+        },
+      },
       {
         id: 'claude-opus-4-8',
         name: 'Claude Opus 4.8',
@@ -254,6 +415,71 @@ export const PROVIDERS: Record<ProviderId, ProviderConfig> = {
     ],
   },
 
+  bedrock: {
+    id: 'bedrock',
+    name: 'Amazon Bedrock',
+    type: 'bedrock',
+    requiresApiKey: false,
+    icon: '/logos/bedrock.svg',
+    models: [
+      {
+        id: 'us.anthropic.claude-sonnet-5',
+        name: 'Claude Sonnet 5 (Bedrock)',
+        contextWindow: 1000000,
+        outputWindow: 128000,
+        capabilities: { streaming: true, tools: true, vision: true },
+      },
+      {
+        id: 'us.anthropic.claude-opus-4-8',
+        name: 'Claude Opus 4.8 (Bedrock)',
+        contextWindow: 1000000,
+        outputWindow: 128000,
+        capabilities: { streaming: true, tools: true, vision: true },
+      },
+      {
+        id: 'us.anthropic.claude-opus-4-7',
+        name: 'Claude Opus 4.7 (Bedrock)',
+        contextWindow: 1000000,
+        outputWindow: 128000,
+        capabilities: { streaming: true, tools: true, vision: true },
+      },
+      {
+        id: 'us.anthropic.claude-sonnet-4-6',
+        name: 'Claude Sonnet 4.6 (Bedrock)',
+        contextWindow: 1000000,
+        outputWindow: 64000,
+        capabilities: { streaming: true, tools: true, vision: true },
+      },
+      {
+        id: 'us.amazon.nova-pro-v1:0',
+        name: 'Amazon Nova Pro',
+        contextWindow: 300000,
+        outputWindow: 10000,
+        capabilities: { streaming: true, tools: true, vision: true },
+      },
+      {
+        id: 'us.amazon.nova-lite-v1:0',
+        name: 'Amazon Nova Lite',
+        contextWindow: 300000,
+        outputWindow: 10000,
+        capabilities: { streaming: true, tools: true, vision: true },
+      },
+      {
+        id: 'us.amazon.nova-micro-v1:0',
+        name: 'Amazon Nova Micro',
+        contextWindow: 128000,
+        outputWindow: 10000,
+        capabilities: { streaming: true, tools: true, vision: false },
+      },
+      {
+        id: 'us.meta.llama3-3-70b-instruct-v1:0',
+        name: 'Llama 3.3 70B Instruct (Bedrock)',
+        contextWindow: 128000,
+        capabilities: { streaming: true, tools: true, vision: false },
+      },
+    ],
+  },
+
   google: {
     id: 'google',
     name: 'Gemini',
@@ -262,6 +488,38 @@ export const PROVIDERS: Record<ProviderId, ProviderConfig> = {
     defaultBaseUrl: 'https://generativelanguage.googleapis.com/v1beta',
     icon: '/logos/gemini.svg',
     models: [
+      {
+        id: 'gemini-3.6-flash',
+        name: 'Gemini 3.6 Flash',
+        contextWindow: 1048576,
+        outputWindow: 65536,
+        capabilities: {
+          streaming: true,
+          tools: true,
+          vision: true,
+          thinking: {
+            toggleable: false,
+            budgetAdjustable: true,
+            defaultEnabled: true,
+          },
+        },
+      },
+      {
+        id: 'gemini-3.5-flash-lite',
+        name: 'Gemini 3.5 Flash-Lite',
+        contextWindow: 1048576,
+        outputWindow: 65536,
+        capabilities: {
+          streaming: true,
+          tools: true,
+          vision: true,
+          thinking: {
+            toggleable: false,
+            budgetAdjustable: true,
+            defaultEnabled: true,
+          },
+        },
+      },
       {
         id: 'gemini-3.5-flash',
         name: 'Gemini 3.5 Flash',
@@ -373,7 +631,24 @@ export const PROVIDERS: Record<ProviderId, ProviderConfig> = {
     requiresApiKey: true,
     icon: '/logos/glm.svg',
     models: [
-      // GLM-5.1 Series - Latest flagship model
+      // GLM-5.2 Series - Long-horizon coding model
+      {
+        id: 'glm-5.2',
+        name: 'GLM-5.2',
+        contextWindow: 1000000,
+        outputWindow: 128000,
+        capabilities: {
+          streaming: true,
+          tools: true,
+          vision: false,
+          thinking: {
+            toggleable: true,
+            budgetAdjustable: true,
+            defaultEnabled: true,
+          },
+        },
+      },
+      // GLM-5.1 Series
       {
         id: 'glm-5.1',
         name: 'GLM-5.1',
@@ -451,6 +726,38 @@ export const PROVIDERS: Record<ProviderId, ProviderConfig> = {
     requiresApiKey: true,
     icon: '/logos/qwen.svg',
     models: [
+      {
+        id: 'qwen3.7-plus',
+        name: 'Qwen3.7 Plus',
+        contextWindow: 1000000,
+        outputWindow: 64000,
+        capabilities: {
+          streaming: true,
+          tools: true,
+          vision: true,
+          thinking: {
+            toggleable: true,
+            budgetAdjustable: true,
+            defaultEnabled: true,
+          },
+        },
+      },
+      {
+        id: 'qwen3.7-max',
+        name: 'Qwen3.7 Max',
+        contextWindow: 1000000,
+        outputWindow: 64000,
+        capabilities: {
+          streaming: true,
+          tools: true,
+          vision: false,
+          thinking: {
+            toggleable: true,
+            budgetAdjustable: true,
+            defaultEnabled: true,
+          },
+        },
+      },
       {
         id: 'qwen3.6-max-preview',
         name: 'Qwen3.6 Max Preview',
@@ -634,6 +941,54 @@ export const PROVIDERS: Record<ProviderId, ProviderConfig> = {
     icon: '/logos/kimi.png',
     models: [
       {
+        id: 'kimi-k3',
+        name: 'Kimi K3',
+        contextWindow: 1048576,
+        outputWindow: 131072,
+        capabilities: {
+          streaming: true,
+          tools: true,
+          vision: true,
+          thinking: {
+            toggleable: false,
+            budgetAdjustable: true,
+            defaultEnabled: true,
+          },
+        },
+      },
+      {
+        id: 'kimi-k2.7-code',
+        name: 'Kimi K2.7 Code',
+        contextWindow: 256000,
+        outputWindow: 32768,
+        capabilities: {
+          streaming: true,
+          tools: true,
+          vision: true,
+          thinking: {
+            toggleable: false,
+            budgetAdjustable: false,
+            defaultEnabled: true,
+          },
+        },
+      },
+      {
+        id: 'kimi-k2.7-code-highspeed',
+        name: 'Kimi K2.7 Code HighSpeed',
+        contextWindow: 256000,
+        outputWindow: 32768,
+        capabilities: {
+          streaming: true,
+          tools: true,
+          vision: true,
+          thinking: {
+            toggleable: false,
+            budgetAdjustable: false,
+            defaultEnabled: true,
+          },
+        },
+      },
+      {
         id: 'kimi-k2.6',
         name: 'Kimi K2.6',
         contextWindow: 256000,
@@ -787,6 +1142,34 @@ export const PROVIDERS: Record<ProviderId, ProviderConfig> = {
     icon: '/logos/doubao.svg',
     models: [
       {
+        id: 'doubao-seed-2-1-pro-260628',
+        name: 'Doubao Seed 2.1 Pro',
+        contextWindow: 256000,
+        outputWindow: 32768,
+        capabilities: { streaming: true, tools: true, vision: true },
+      },
+      {
+        id: 'doubao-seed-2-1-turbo-260628',
+        name: 'Doubao Seed 2.1 Turbo',
+        contextWindow: 256000,
+        outputWindow: 32768,
+        capabilities: { streaming: true, tools: true, vision: true },
+      },
+      {
+        id: 'doubao-seed-evolving',
+        name: 'Doubao Seed Evolving',
+        contextWindow: 256000,
+        outputWindow: 32768,
+        capabilities: { streaming: true, tools: true, vision: true },
+      },
+      {
+        id: 'doubao-seed-character-260628',
+        name: 'Doubao Seed Character',
+        contextWindow: 256000,
+        outputWindow: 32768,
+        capabilities: { streaming: true, tools: true, vision: true },
+      },
+      {
         id: 'doubao-seed-2-0-pro-260215',
         name: 'Doubao Seed 2.0 Pro',
         contextWindow: 128000,
@@ -850,6 +1233,70 @@ export const PROVIDERS: Record<ProviderId, ProviderConfig> = {
     requiresApiKey: true,
     icon: '/logos/grok.svg',
     models: [
+      {
+        id: 'grok-4.6',
+        name: 'Grok 4.6',
+        contextWindow: 500000,
+        outputWindow: 500000,
+        capabilities: {
+          streaming: true,
+          tools: true,
+          vision: true,
+          thinking: {
+            toggleable: false,
+            budgetAdjustable: true,
+            defaultEnabled: true,
+          },
+        },
+      },
+      {
+        id: 'grok-4.5',
+        name: 'Grok 4.5',
+        contextWindow: 500000,
+        outputWindow: 500000,
+        capabilities: {
+          streaming: true,
+          tools: true,
+          vision: true,
+          thinking: {
+            toggleable: false,
+            budgetAdjustable: true,
+            defaultEnabled: true,
+          },
+        },
+      },
+      {
+        id: 'grok-4.3',
+        name: 'Grok 4.3',
+        contextWindow: 1000000,
+        outputWindow: 30000,
+        capabilities: {
+          streaming: true,
+          tools: true,
+          vision: true,
+          thinking: {
+            toggleable: true,
+            budgetAdjustable: true,
+            defaultEnabled: false,
+          },
+        },
+      },
+      {
+        id: 'grok-build-0.1',
+        name: 'Grok Build 0.1',
+        contextWindow: 256000,
+        outputWindow: 256000,
+        capabilities: {
+          streaming: true,
+          tools: true,
+          vision: true,
+          thinking: {
+            toggleable: false,
+            budgetAdjustable: false,
+            defaultEnabled: true,
+          },
+        },
+      },
       {
         id: 'grok-4.20-reasoning',
         name: 'Grok 4.20 Reasoning',
@@ -1154,6 +1601,17 @@ function getCompatThinkingBodyParams(
   modelId: string,
   config: ThinkingConfig,
 ): Record<string, unknown> | undefined {
+  // This model is served through an OpenAI-compatible gateway even when the
+  // deployment uses the `openai` provider slot. The gateway's chat template
+  // toggle is neither OpenAI's `reasoning_effort` nor DeepSeek's native
+  // `thinking` object: it requires this exact vLLM template argument.
+  if (providerId === 'openai' && modelId === 'deepseek-v4-flash-vision-exp') {
+    const mode = getThinkingMode(config);
+    return mode === undefined
+      ? undefined
+      : { chat_template_kwargs: { thinking: mode === 'enabled' } };
+  }
+
   const capability = getCatalogThinkingCapability(providerId, modelId);
   if (!capability || capability.control === 'none') return undefined;
 
@@ -1161,12 +1619,38 @@ function getCompatThinkingBodyParams(
   const budget = pickThinkingBudget(capability, config);
 
   switch (capability.requestAdapter) {
+    case 'openai': {
+      const effort = pickThinkingEffort(capability, config);
+      return effort ? { reasoning_effort: effort } : undefined;
+    }
+
     case 'kimi':
-    case 'glm':
     case 'xiaomi':
       if (mode === 'disabled') return { thinking: { type: 'disabled' } };
       if (mode === 'enabled') return { thinking: { type: 'enabled' } };
       return undefined;
+
+    case 'glm': {
+      if (capability.control === 'effort') {
+        if (mode === 'disabled' || config.effort === 'none') {
+          return { thinking: { type: 'disabled' } };
+        }
+
+        const effort =
+          config.effort && capability.effortValues?.includes(config.effort)
+            ? config.effort
+            : mode === 'enabled'
+              ? capability.defaultEffort
+              : undefined;
+        const body: Record<string, unknown> = {};
+        if (mode === 'enabled' || effort) body.thinking = { type: 'enabled' };
+        if (effort) body.reasoning_effort = effort;
+        return Object.keys(body).length > 0 ? body : undefined;
+      }
+      if (mode === 'disabled') return { thinking: { type: 'disabled' } };
+      if (mode === 'enabled') return { thinking: { type: 'enabled' } };
+      return undefined;
+    }
 
     case 'deepseek': {
       if (mode === 'disabled' || config.effort === 'none') {
@@ -1194,7 +1678,7 @@ function getCompatThinkingBodyParams(
         if (mode === 'disabled') body.enable_thinking = false;
         if (mode === 'enabled') body.enable_thinking = true;
       }
-      if (budget !== undefined) body.thinking_budget = budget;
+      if (budget !== undefined && budget > 0) body.thinking_budget = budget;
       return Object.keys(body).length > 0 ? body : undefined;
     }
 
@@ -1284,13 +1768,254 @@ function normalizeMiniMaxAnthropicBaseUrl(
   return `${trimmed}/anthropic/v1`;
 }
 
+function resolveBedrockRegion(): string {
+  return (
+    process.env.BEDROCK_REGION?.trim() ||
+    process.env.AWS_REGION?.trim() ||
+    process.env.AWS_DEFAULT_REGION?.trim() ||
+    'us-east-1'
+  );
+}
+
+interface BedrockCredentials {
+  accessKeyId: string;
+  secretAccessKey: string;
+  sessionToken?: string;
+  expiration?: Date;
+}
+
+type BedrockCredentialProvider = () => Promise<BedrockCredentials>;
+
+let bedrockCredentialProviderPromise: Promise<BedrockCredentialProvider> | undefined;
+
+function getBedrockCredentialProvider(): Promise<BedrockCredentialProvider> {
+  bedrockCredentialProviderPromise ??= import('@aws-sdk/credential-providers').then(
+    ({ fromNodeProviderChain }) => fromNodeProviderChain(),
+  );
+  return bedrockCredentialProviderPromise;
+}
+
+function createBedrockCredentialProvider(): BedrockCredentialProvider {
+  return async () => {
+    const credentialProvider = await getBedrockCredentialProvider();
+    const credentials = await credentialProvider();
+    return {
+      accessKeyId: credentials.accessKeyId,
+      secretAccessKey: credentials.secretAccessKey,
+      sessionToken: credentials.sessionToken,
+      expiration: credentials.expiration,
+    };
+  };
+}
+
 function shouldUseOpenAIResponsesApi(providerId: ProviderId, modelId: string): boolean {
   if (providerId !== 'openai') return false;
 
   return (
     /^gpt-5\.\d+-pro(?:-|$)/.test(modelId) ||
+    /^gpt-5\.6(?:-|$)/.test(modelId) ||
     /^gpt-5\.5(?:-|$)/.test(modelId) ||
     /^gpt-5\.[3-9]-codex(?:-|$)/.test(modelId)
+  );
+}
+
+function usesCustomOpenAIBaseUrl(baseUrl?: string): boolean {
+  if (!baseUrl) return false;
+  const trimmed = baseUrl.trim();
+  if (!trimmed) return false;
+
+  try {
+    const url = new URL(trimmed);
+    const pathname = url.pathname.replace(/\/+$/, '');
+    return url.origin !== 'https://api.openai.com' || pathname !== '/v1';
+  } catch {
+    return true;
+  }
+}
+
+function shouldUseOpenAIStreamingChatCompat(providerId: ProviderId, baseUrl?: string): boolean {
+  return (
+    providerId === 'openai' &&
+    usesCustomOpenAIBaseUrl(baseUrl) &&
+    process.env.OPENAI_COMPAT_USE_STREAMING_CHAT === 'true'
+  );
+}
+
+function requestUrlString(input: RequestInfo | URL): string {
+  if (typeof input === 'string') return input;
+  if (input instanceof URL) return input.toString();
+  return input.url;
+}
+
+function appendChatDelta(value: unknown): string {
+  if (typeof value === 'string') return value;
+  if (!Array.isArray(value)) return '';
+  return value
+    .map((part) => {
+      if (!part || typeof part !== 'object') return '';
+      const record = part as Record<string, unknown>;
+      return typeof record.text === 'string' ? record.text : '';
+    })
+    .join('');
+}
+
+function openAIJsonResponseHeaders(response: Response): Headers {
+  const headers = new Headers(response.headers);
+  headers.set('content-type', 'application/json');
+  headers.delete('content-length');
+  headers.delete('content-encoding');
+  headers.delete('transfer-encoding');
+  return headers;
+}
+
+function openAIStreamErrorStatus(error: Record<string, unknown>): number {
+  const status =
+    typeof error.code === 'number'
+      ? error.code
+      : typeof error.code === 'string'
+        ? Number(error.code)
+        : NaN;
+  return Number.isInteger(status) && status >= 400 && status <= 599 ? status : 500;
+}
+
+async function fetchCustomOpenAIChat(
+  input: RequestInfo | URL,
+  init?: RequestInit,
+): Promise<Response> {
+  const requestUrl = requestUrlString(input);
+  if (!requestUrl.includes('/chat/completions') || !init?.body || typeof init.body !== 'string') {
+    return globalThis.fetch(input, init);
+  }
+
+  let requestBody: Record<string, unknown>;
+  try {
+    requestBody = JSON.parse(init.body) as Record<string, unknown>;
+  } catch {
+    return globalThis.fetch(input, init);
+  }
+
+  if (requestBody.stream === true) return globalThis.fetch(input, init);
+
+  const streamOptions =
+    requestBody.stream_options &&
+    typeof requestBody.stream_options === 'object' &&
+    !Array.isArray(requestBody.stream_options)
+      ? (requestBody.stream_options as Record<string, unknown>)
+      : {};
+
+  const response = await globalThis.fetch(input, {
+    ...init,
+    body: JSON.stringify({
+      ...requestBody,
+      stream: true,
+      stream_options: { ...streamOptions, include_usage: true },
+    }),
+  });
+  if (!response.ok) return response;
+
+  const rawStream = await response.text();
+  const streamLines = rawStream.split(/\r?\n/);
+  if (!streamLines.some((line) => line.startsWith('data:'))) {
+    const headers = new Headers(response.headers);
+    headers.delete('content-length');
+    headers.delete('content-encoding');
+    headers.delete('transfer-encoding');
+    return new Response(rawStream, {
+      status: response.status,
+      statusText: response.statusText,
+      headers,
+    });
+  }
+  let id = '';
+  let created = 0;
+  let model = typeof requestBody.model === 'string' ? requestBody.model : '';
+  let content = '';
+  let finishReason: unknown = null;
+  let usage: unknown;
+  const toolCalls = new Map<
+    number,
+    { id: string; type: string; function: { name: string; arguments: string } }
+  >();
+
+  for (const line of streamLines) {
+    if (!line.startsWith('data:')) continue;
+    const data = line.slice(5).trim();
+    if (!data || data === '[DONE]') continue;
+
+    try {
+      const chunk = JSON.parse(data) as Record<string, unknown>;
+      const error =
+        chunk.error && typeof chunk.error === 'object' && !Array.isArray(chunk.error)
+          ? (chunk.error as Record<string, unknown>)
+          : undefined;
+      if (error && typeof error.message === 'string') {
+        return new Response(JSON.stringify(chunk), {
+          status: openAIStreamErrorStatus(error),
+          headers: openAIJsonResponseHeaders(response),
+        });
+      }
+
+      if (typeof chunk.id === 'string') id = chunk.id;
+      if (typeof chunk.created === 'number') created = chunk.created;
+      if (typeof chunk.model === 'string') model = chunk.model;
+      if (chunk.usage) usage = chunk.usage;
+
+      const choices = Array.isArray(chunk.choices) ? chunk.choices : [];
+      for (const rawChoice of choices) {
+        if (!rawChoice || typeof rawChoice !== 'object') continue;
+        const choice = rawChoice as Record<string, unknown>;
+        if (typeof choice.index === 'number' && choice.index !== 0) continue;
+        if (choice.finish_reason) finishReason = choice.finish_reason;
+        if (!choice.delta || typeof choice.delta !== 'object') continue;
+        const delta = choice.delta as Record<string, unknown>;
+        content += appendChatDelta(delta.content);
+
+        if (!Array.isArray(delta.tool_calls)) continue;
+        for (const rawToolCall of delta.tool_calls) {
+          if (!rawToolCall || typeof rawToolCall !== 'object') continue;
+          const toolCall = rawToolCall as Record<string, unknown>;
+          const index = typeof toolCall.index === 'number' ? toolCall.index : 0;
+          const current = toolCalls.get(index) || {
+            id: '',
+            type: 'function',
+            function: { name: '', arguments: '' },
+          };
+          if (typeof toolCall.id === 'string') current.id = toolCall.id;
+          if (typeof toolCall.type === 'string') current.type = toolCall.type;
+          if (toolCall.function && typeof toolCall.function === 'object') {
+            const fn = toolCall.function as Record<string, unknown>;
+            if (typeof fn.name === 'string' && fn.name) current.function.name = fn.name;
+            if (typeof fn.arguments === 'string') current.function.arguments += fn.arguments;
+          }
+          toolCalls.set(index, current);
+        }
+      }
+    } catch {
+      // Ignore non-JSON SSE lines and continue collecting valid chunks.
+    }
+  }
+
+  const message: Record<string, unknown> = { role: 'assistant', content };
+  if (toolCalls.size > 0) {
+    message.tool_calls = [...toolCalls.entries()]
+      .sort(([a], [b]) => a - b)
+      .map(([, toolCall]) => toolCall);
+  }
+
+  return new Response(
+    JSON.stringify({
+      id: id || `chatcmpl_${Date.now()}`,
+      object: 'chat.completion',
+      created: created || Math.floor(Date.now() / 1000),
+      model,
+      choices: [{ index: 0, message, finish_reason: finishReason }],
+      ...(usage ? { usage } : {}),
+    }),
+    {
+      status: response.status,
+      statusText: response.statusText,
+      headers: openAIJsonResponseHeaders(response),
+    },
   );
 }
 
@@ -1308,6 +2033,12 @@ export function getModel(config: ModelConfig): ModelWithInfo {
   let providerType = config.providerType;
   const provider = getProviderConfig(config.providerId);
   const requiresApiKey = provider?.requiresApiKey ?? true;
+
+  if (provider && providerType && providerType !== provider.type) {
+    throw new Error(
+      `Provider type mismatch for ${config.providerId}: expected ${provider.type}, received ${providerType}.`,
+    );
+  }
 
   if (!providerType) {
     if (provider) {
@@ -1334,17 +2065,36 @@ export function getModel(config: ModelConfig): ModelWithInfo {
   let model: LanguageModel;
 
   switch (providerType) {
+    case 'azure': {
+      const azure = createAzure({
+        apiKey: effectiveApiKey,
+        baseURL: normalizeAzureBaseUrl(effectiveBaseUrl),
+      });
+      model = azure(config.modelId);
+      break;
+    }
+
     case 'openai': {
+      const useStreamingChatCompat = shouldUseOpenAIStreamingChatCompat(
+        config.providerId,
+        effectiveBaseUrl,
+      );
       const openaiOptions: Parameters<typeof createOpenAI>[0] = {
         apiKey: effectiveApiKey,
         baseURL: effectiveBaseUrl,
+        name: config.providerId,
       };
 
-      // For OpenAI-compatible providers (not native OpenAI), add a fetch
-      // wrapper that injects vendor-specific thinking params into the HTTP
-      // body. The thinking config is read from AsyncLocalStorage, set by
-      // callLLM / streamLLM at call time.
-      if (config.providerId !== 'openai') {
+      // A custom base URL makes the `openai` slot an OpenAI-compatible gateway,
+      // not the native OpenAI service. Give it the same request/response seam
+      // as named compatible providers: inject the gateway's thinking control
+      // and recover reasoning_content before the SDK schema can discard it.
+      const usesOpenAIResponses =
+        !useStreamingChatCompat && shouldUseOpenAIResponsesApi(config.providerId, config.modelId);
+      const usesCompatTransport =
+        config.providerId !== 'openai' ||
+        (usesCustomOpenAIBaseUrl(config.baseUrl) && !usesOpenAIResponses);
+      if (usesCompatTransport) {
         const providerId = config.providerId;
         const compatFetch = async (url: RequestInfo | URL, init?: RequestInit) => {
           // Read thinking config from globalThis (set by thinking-context.ts)
@@ -1372,10 +2122,45 @@ export function getModel(config: ModelConfig): ModelWithInfo {
               }
             }
           }
-          const response = await globalThis.fetch(url, init);
+
+          if (
+            providerId === 'kimi' &&
+            config.modelId === 'kimi-k3' &&
+            init?.body &&
+            typeof init.body === 'string'
+          ) {
+            try {
+              const body = JSON.parse(init.body);
+              restoreKimiReasoningInRequestBody(body);
+              init = { ...init, body: JSON.stringify(body) };
+            } catch {
+              /* leave body as-is */
+            }
+          }
+          const response = useStreamingChatCompat
+            ? await fetchCustomOpenAIChat(url, init)
+            : await globalThis.fetch(url, init);
+
+          // Recover reasoning that @ai-sdk/openai's chat schema drops: rewrite
+          // streamed `reasoning_content` deltas into an inline <think> block
+          // (the model below is wrapped with extractReasoningMiddleware to split
+          // it back into first-class reasoning parts). No-op when absent.
+          let streaming = false;
+          if (init?.body && typeof init.body === 'string') {
+            try {
+              streaming = JSON.parse(init.body)?.stream === true;
+            } catch {
+              /* ignore request-body inspection failure */
+            }
+          }
+          const normalizedReasoningResponse = streaming
+            ? wrapResponseWithReasoning(response)
+            : providerId === 'kimi' && config.modelId === 'kimi-k3'
+              ? await wrapJsonResponseWithReasoning(response)
+              : response;
 
           if (providerId !== 'lemonade') {
-            return response;
+            return normalizedReasoningResponse;
           }
 
           const contentType = response.headers.get('content-type') || '';
@@ -1415,9 +2200,26 @@ export function getModel(config: ModelConfig): ModelWithInfo {
       }
 
       const openai = createOpenAI(openaiOptions);
-      model = shouldUseOpenAIResponsesApi(config.providerId, config.modelId)
-        ? openai.responses(config.modelId)
-        : openai.chat(config.modelId);
+      model = usesOpenAIResponses ? openai.responses(config.modelId) : openai.chat(config.modelId);
+      // OpenAI-compatible providers (e.g. DeepSeek, Qwen), including a custom
+      // gateway configured through the `openai` slot, stream reasoning
+      // either as a separate `reasoning_content` field (normalized to an inline
+      // <think> block by compatFetch) or as native inline <think>.
+      // Split it into first-class reasoning parts so the agent stream and UI can
+      // show a thinking panel and the answer text stays clean.
+      if (usesCompatTransport) {
+        const middleware =
+          config.providerId === 'kimi' && config.modelId === 'kimi-k3'
+            ? [
+                createKimiReasoningPreservationMiddleware(),
+                extractReasoningMiddleware({ tagName: 'think' }),
+              ]
+            : extractReasoningMiddleware({ tagName: 'think' });
+        model = wrapLanguageModel({
+          model,
+          middleware,
+        });
+      }
       break;
     }
 
@@ -1463,6 +2265,17 @@ export function getModel(config: ModelConfig): ModelWithInfo {
       break;
     }
 
+    case 'bedrock': {
+      const bedrock = createAmazonBedrock({
+        apiKey: effectiveApiKey || undefined,
+        region: resolveBedrockRegion(),
+        baseURL: effectiveBaseUrl,
+        credentialProvider: createBedrockCredentialProvider(),
+      });
+      model = bedrock(config.modelId);
+      break;
+    }
+
     case 'google': {
       const googleOptions: Parameters<typeof createGoogleGenerativeAI>[0] = {
         apiKey: effectiveApiKey,
@@ -1499,9 +2312,36 @@ export function getModel(config: ModelConfig): ModelWithInfo {
   }
 
   // Look up model info from the provider registry
-  const modelInfo = provider?.models.find((m) => m.id === config.modelId) || null;
+  const modelInfo = findModelById(config.providerId, provider?.models, config.modelId) ?? null;
 
   return { model, modelInfo };
+}
+
+/**
+ * Deprecation notice for bare model ids (no `provider:` prefix). parseModelString
+ * keeps defaulting them to `openai` for backward compatibility, but that fallback
+ * is deprecated: configs should write `provider:model` explicitly. Emitted only
+ * by the boot-time config validation for config-derived sites — never for
+ * request-derived strings, which would let clients drive log volume.
+ */
+export const BARE_MODEL_ID_DEPRECATION_MSG =
+  'bare model ids default to openai for backward compatibility; this fallback is deprecated — write provider:model';
+
+/** Bare model ids already surfaced, so the deprecation fires once per unique id. */
+const warnedBareModelIds = new Set<string>();
+
+/**
+ * Warn once per unique bare model id. `where` names the config site (e.g.
+ * `DEFAULT_MODEL` or a MODEL_ROUTES stage). Callers must pass only
+ * config-derived ids (the config surface is finite, so the dedupe set is
+ * bounded); request-derived strings must never reach this function.
+ */
+export function warnBareModelIdDeprecation(bareModelId: string, where?: string): boolean {
+  if (warnedBareModelIds.has(bareModelId)) return false;
+  warnedBareModelIds.add(bareModelId);
+  const context = where ? `${where}: ` : '';
+  console.warn(`[config] ${context}${BARE_MODEL_ID_DEPRECATION_MSG} (bare id "${bareModelId}")`);
+  return true;
 }
 
 /**
@@ -1521,7 +2361,10 @@ export function parseModelString(modelString: string): {
     };
   }
 
-  // Default to OpenAI for backward compatibility
+  // Default to OpenAI for backward compatibility (deprecated; boot-time config
+  // validation warns for config-derived bare ids). Deliberately no warning
+  // here: this path is reachable with request-controlled strings, which must
+  // not drive logging or dedupe-set growth.
   return {
     providerId: 'openai',
     modelId: modelString,
@@ -1553,5 +2396,5 @@ export function getProvider(providerId: ProviderId): ProviderConfig | undefined 
  */
 export function getModelInfo(providerId: ProviderId, modelId: string): ModelInfo | undefined {
   const provider = PROVIDERS[providerId];
-  return provider?.models.find((m) => m.id === modelId);
+  return findModelById(providerId, provider?.models, modelId);
 }

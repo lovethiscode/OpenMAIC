@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const openAiMock = vi.hoisted(() => ({
   chat: vi.fn((modelId: string) => ({ endpoint: 'chat', modelId })),
@@ -6,17 +6,28 @@ const openAiMock = vi.hoisted(() => ({
   createOpenAI: vi.fn(),
 }));
 
+const azureMock = vi.hoisted(() => ({
+  model: vi.fn((deploymentId: string) => ({ endpoint: 'azure-responses', deploymentId })),
+  createAzure: vi.fn(),
+}));
+
 vi.mock('@ai-sdk/openai', () => ({
   createOpenAI: openAiMock.createOpenAI,
 }));
 
-import { getModel, getModelInfo } from '@/lib/ai/providers';
+vi.mock('@ai-sdk/azure', () => ({
+  createAzure: azureMock.createAzure,
+}));
+
+import { getModel, getModelInfo, getProvider } from '@/lib/ai/providers';
+import { normalizeAzureBaseUrl } from '@/lib/ai/azure';
 import type { ProviderId } from '@/lib/types/provider';
 
 async function captureInjectedRequestBody(
   providerId: ProviderId,
   modelId: string,
   thinkingConfig?: Record<string, unknown>,
+  baseUrl?: string,
 ) {
   const originalFetch = globalThis.fetch;
   const globalRecord = globalThis as Record<string, unknown>;
@@ -38,6 +49,7 @@ async function captureInjectedRequestBody(
       providerId,
       modelId,
       apiKey: 'sk-test',
+      baseUrl,
     });
 
     const lastCall = openAiMock.createOpenAI.mock.calls.at(-1);
@@ -65,6 +77,7 @@ async function captureInjectedRequestBody(
 
 describe('OpenAI provider defaults', () => {
   beforeEach(() => {
+    vi.stubEnv('OPENAI_COMPAT_USE_STREAMING_CHAT', 'false');
     openAiMock.chat.mockClear();
     openAiMock.responses.mockClear();
     openAiMock.createOpenAI.mockReset();
@@ -72,6 +85,60 @@ describe('OpenAI provider defaults', () => {
       chat: openAiMock.chat,
       responses: openAiMock.responses,
     });
+    azureMock.model.mockClear();
+    azureMock.createAzure.mockReset();
+    azureMock.createAzure.mockReturnValue(azureMock.model);
+  });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it.each([
+    ['gpt-5.6', 'GPT-5.6 Sol'],
+    ['gpt-5.6-terra', 'GPT-5.6 Terra'],
+    ['gpt-5.6-luna', 'GPT-5.6 Luna'],
+  ])('includes %s as a built-in OpenAI model', (modelId, name) => {
+    expect(getModelInfo('openai', modelId)).toMatchObject({
+      id: modelId,
+      name,
+      contextWindow: 1050000,
+      outputWindow: 128000,
+      capabilities: {
+        streaming: true,
+        tools: true,
+        vision: true,
+        thinking: {
+          control: 'effort',
+          requestAdapter: 'openai',
+          effortValues: ['none', 'low', 'medium', 'high', 'xhigh', 'max'],
+          defaultEffort: 'medium',
+          toggleable: true,
+          budgetAdjustable: true,
+          defaultEnabled: true,
+        },
+      },
+    });
+  });
+
+  it.each(['gpt-5.6', 'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna'])(
+    'routes %s through the OpenAI Responses API',
+    (modelId) => {
+      const { model, modelInfo } = getModel({
+        providerId: 'openai',
+        modelId,
+        apiKey: 'sk-test',
+      });
+
+      expect(openAiMock.responses).toHaveBeenCalledWith(modelId);
+      expect(openAiMock.chat).not.toHaveBeenCalled();
+      expect(model).toEqual({ endpoint: 'responses', modelId });
+      expect(modelInfo).toBe(getModelInfo('openai', modelId));
+    },
+  );
+
+  it('resolves GPT-5.6 Sol model info through the canonical built-in entry', () => {
+    expect(getModelInfo('openai', 'gpt-5.6-sol')).toBe(getModelInfo('openai', 'gpt-5.6'));
   });
 
   it('includes GPT-5.5 as a built-in OpenAI model', () => {
@@ -105,9 +172,417 @@ describe('OpenAI provider defaults', () => {
     expect(model).toEqual({ endpoint: 'responses', modelId: 'gpt-5.5' });
   });
 
+  it('keeps the Responses API for a custom OpenAI base URL by default', () => {
+    getModel({
+      providerId: 'openai',
+      modelId: 'gpt-5.6-sol',
+      apiKey: 'sk-test',
+      baseUrl: 'https://relay.example/v1',
+    });
+
+    const options = openAiMock.createOpenAI.mock.calls.at(-1)?.[0] as
+      | { fetch?: typeof fetch }
+      | undefined;
+    expect(options?.fetch).toBeUndefined();
+    expect(openAiMock.responses).toHaveBeenCalledWith('gpt-5.6-sol');
+    expect(openAiMock.chat).not.toHaveBeenCalled();
+  });
+
+  it('routes a custom OpenAI base URL through Chat Completions when compatibility is enabled', () => {
+    vi.stubEnv('OPENAI_COMPAT_USE_STREAMING_CHAT', 'true');
+
+    getModel({
+      providerId: 'openai',
+      modelId: 'gpt-5.6-sol',
+      apiKey: 'sk-test',
+      baseUrl: 'https://relay.example/v1',
+    });
+
+    const options = openAiMock.createOpenAI.mock.calls.at(-1)?.[0] as
+      | { fetch?: typeof fetch }
+      | undefined;
+    expect(options?.fetch).toBeTypeOf('function');
+    expect(openAiMock.chat).toHaveBeenCalledWith('gpt-5.6-sol');
+    expect(openAiMock.responses).not.toHaveBeenCalled();
+  });
+
   it.each([
+    'https://api.openai.com/v1/',
+    ' https://API.openai.com/v1 ',
+    'https://api.openai.com/v1?api-version=latest',
+  ])('does not enable compatibility for the official OpenAI base URL: %s', (baseUrl) => {
+    vi.stubEnv('OPENAI_COMPAT_USE_STREAMING_CHAT', 'true');
+
+    getModel({
+      providerId: 'openai',
+      modelId: 'gpt-5.6-sol',
+      apiKey: 'sk-test',
+      baseUrl,
+    });
+
+    const options = openAiMock.createOpenAI.mock.calls.at(-1)?.[0] as
+      | { fetch?: typeof fetch }
+      | undefined;
+    expect(options?.fetch).toBeUndefined();
+    expect(openAiMock.responses).toHaveBeenCalledWith('gpt-5.6-sol');
+    expect(openAiMock.chat).not.toHaveBeenCalled();
+  });
+
+  it('buffers custom OpenAI Chat streams for non-streaming SDK calls', async () => {
+    vi.stubEnv('OPENAI_COMPAT_USE_STREAMING_CHAT', 'true');
+    const originalFetch = globalThis.fetch;
+    const chunks = [
+      {
+        id: 'chatcmpl_test',
+        object: 'chat.completion.chunk',
+        created: 123,
+        model: 'gpt-5.6-sol',
+        choices: [
+          {
+            index: 0,
+            delta: {
+              role: 'assistant',
+              content: '{"elements":',
+              tool_calls: [
+                {
+                  index: 0,
+                  id: 'call_test',
+                  type: 'function',
+                  function: { name: 'buildSlide', arguments: '{"title":' },
+                },
+              ],
+            },
+          },
+        ],
+      },
+      {
+        id: 'chatcmpl_test',
+        object: 'chat.completion.chunk',
+        created: 123,
+        model: 'gpt-5.6-sol',
+        choices: [
+          {
+            index: 0,
+            delta: {
+              content: '[]}',
+              tool_calls: [
+                {
+                  index: 0,
+                  function: { name: 'buildSlide', arguments: '"Demo"}' },
+                },
+              ],
+            },
+            finish_reason: 'stop',
+          },
+          {
+            index: 1,
+            delta: { content: 'ignored secondary choice' },
+            finish_reason: 'length',
+          },
+        ],
+        usage: { prompt_tokens: 10, completion_tokens: 2, total_tokens: 12 },
+      },
+    ];
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => {
+      const body = `${chunks.map((chunk) => `data: ${JSON.stringify(chunk)}\n\n`).join('')}data: [DONE]\n\n`;
+      return new Response(body, {
+        status: 200,
+        // Some relays send SSE data with this incorrect content type.
+        headers: { 'content-type': 'application/json', 'content-length': '1' },
+      });
+    });
+
+    try {
+      globalThis.fetch = fetchMock as typeof fetch;
+      getModel({
+        providerId: 'openai',
+        modelId: 'gpt-5.6-sol',
+        apiKey: 'sk-test',
+        baseUrl: 'https://relay.example/v1',
+      });
+
+      const lastCall = openAiMock.createOpenAI.mock.calls.at(-1);
+      const options = lastCall?.[0] as { fetch?: typeof fetch } | undefined;
+      const response = await options?.fetch?.('https://relay.example/v1/chat/completions', {
+        method: 'POST',
+        body: JSON.stringify({
+          model: 'gpt-5.6-sol',
+          messages: [],
+          stream: false,
+          stream_options: { include_usage: false, relay_option: 'preserve' },
+        }),
+      });
+      const request = JSON.parse(fetchMock.mock.calls[0]?.[1]?.body as string);
+      const body = await response?.json();
+
+      expect(request).toMatchObject({
+        stream: true,
+        stream_options: { include_usage: true, relay_option: 'preserve' },
+      });
+      expect(body.choices[0]).toMatchObject({
+        message: {
+          role: 'assistant',
+          content: '{"elements":[]}',
+          tool_calls: [
+            {
+              id: 'call_test',
+              type: 'function',
+              function: { name: 'buildSlide', arguments: '{"title":"Demo"}' },
+            },
+          ],
+        },
+        finish_reason: 'stop',
+      });
+      expect(body.usage.total_tokens).toBe(12);
+      expect(response?.headers.get('content-type')).toBe('application/json');
+      expect(response?.headers.get('content-length')).toBeNull();
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it('buffers SSE after preamble fields and preserves a missing finish reason', async () => {
+    vi.stubEnv('OPENAI_COMPAT_USE_STREAMING_CHAT', 'true');
+    const originalFetch = globalThis.fetch;
+    const chunk = {
+      id: 'chatcmpl_preamble',
+      object: 'chat.completion.chunk',
+      created: 123,
+      model: 'gpt-5.6-sol',
+      choices: [{ index: 0, delta: { role: 'assistant', content: 'ok' } }],
+    };
+    const fetchMock = vi.fn(async () => {
+      const body = `: ping\n\nevent: message\ndata: ${JSON.stringify(chunk)}\n\ndata: [DONE]\n\n`;
+      return new Response(body, {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    });
+
+    try {
+      globalThis.fetch = fetchMock as typeof fetch;
+      getModel({
+        providerId: 'openai',
+        modelId: 'gpt-5.6-sol',
+        apiKey: 'sk-test',
+        baseUrl: 'https://relay.example/v1',
+      });
+
+      const options = openAiMock.createOpenAI.mock.calls.at(-1)?.[0] as
+        | { fetch?: typeof fetch }
+        | undefined;
+      const response = await options?.fetch?.('https://relay.example/v1/chat/completions', {
+        method: 'POST',
+        body: JSON.stringify({ model: 'gpt-5.6-sol', messages: [], stream: false }),
+      });
+      const body = await response?.json();
+
+      expect(body.choices[0]).toMatchObject({
+        message: { role: 'assistant', content: 'ok' },
+        finish_reason: null,
+      });
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it('creates an Azure OpenAI model using the deployment name', () => {
+    const { model } = getModel({
+      providerId: 'azure',
+      modelId: 'course-generation',
+      apiKey: 'azure-key',
+      baseUrl: 'https://test-resource.openai.azure.com/openai',
+    });
+
+    expect(getProvider('azure')).toMatchObject({
+      type: 'azure',
+      supportsModelDiscovery: false,
+    });
+    expect(azureMock.createAzure).toHaveBeenCalledWith({
+      apiKey: 'azure-key',
+      baseURL: 'https://test-resource.openai.azure.com/openai',
+    });
+    expect(azureMock.model).toHaveBeenCalledWith('course-generation');
+    expect(model).toEqual({
+      endpoint: 'azure-responses',
+      deploymentId: 'course-generation',
+    });
+  });
+
+  it('normalizes full Azure inference endpoints before creating the provider', () => {
+    getModel({
+      providerId: 'azure',
+      modelId: 'course-generation',
+      apiKey: 'azure-key',
+      baseUrl: 'https://fast-ai-resource.services.ai.azure.com/openai/v1/chat/completions',
+    });
+
+    expect(azureMock.createAzure).toHaveBeenCalledWith({
+      apiKey: 'azure-key',
+      baseURL: 'https://fast-ai-resource.services.ai.azure.com/openai/v1',
+    });
+  });
+
+  it('normalizes classic Azure OpenAI resource endpoints', () => {
+    expect(normalizeAzureBaseUrl('https://example.openai.azure.com')).toBe(
+      'https://example.openai.azure.com/openai',
+    );
+    expect(
+      normalizeAzureBaseUrl(
+        'https://example.openai.azure.com/openai/v1/chat/completions?api-version=v1',
+      ),
+    ).toBe('https://example.openai.azure.com/openai');
+    expect(
+      normalizeAzureBaseUrl(
+        'https://example.openai.azure.com/openai/deployments/course-generation/chat/completions?api-version=2024-10-21',
+      ),
+    ).toBe('https://example.openai.azure.com/openai');
+  });
+
+  it('includes latest official GLM and Kimi models', () => {
+    expect(getModelInfo('glm', 'glm-5.2')).toMatchObject({
+      id: 'glm-5.2',
+      name: 'GLM-5.2',
+      contextWindow: 1000000,
+      outputWindow: 128000,
+      capabilities: {
+        streaming: true,
+        tools: true,
+        vision: false,
+      },
+    });
+    expect(getModelInfo('kimi', 'kimi-k2.7-code')).toMatchObject({
+      id: 'kimi-k2.7-code',
+      name: 'Kimi K2.7 Code',
+      contextWindow: 256000,
+      outputWindow: 32768,
+      capabilities: {
+        streaming: true,
+        tools: true,
+        vision: true,
+      },
+    });
+    expect(getModelInfo('kimi', 'kimi-k2.7-code-highspeed')).toMatchObject({
+      id: 'kimi-k2.7-code-highspeed',
+      name: 'Kimi K2.7 Code HighSpeed',
+      contextWindow: 256000,
+      outputWindow: 32768,
+      capabilities: {
+        streaming: true,
+        tools: true,
+        vision: true,
+      },
+    });
+    expect(getModelInfo('kimi', 'kimi-k3')).toMatchObject({
+      id: 'kimi-k3',
+      name: 'Kimi K3',
+      contextWindow: 1048576,
+      outputWindow: 131072,
+      capabilities: {
+        streaming: true,
+        tools: true,
+        vision: true,
+      },
+    });
+  });
+
+  it('includes latest official Doubao Seed chat models', () => {
+    expect(getModelInfo('doubao', 'doubao-seed-2-1-pro-260628')).toMatchObject({
+      id: 'doubao-seed-2-1-pro-260628',
+      name: 'Doubao Seed 2.1 Pro',
+      contextWindow: 256000,
+      outputWindow: 32768,
+      capabilities: {
+        streaming: true,
+        tools: true,
+        vision: true,
+      },
+    });
+    expect(getModelInfo('doubao', 'doubao-seed-2-1-turbo-260628')).toMatchObject({
+      id: 'doubao-seed-2-1-turbo-260628',
+      name: 'Doubao Seed 2.1 Turbo',
+      contextWindow: 256000,
+      outputWindow: 32768,
+      capabilities: {
+        streaming: true,
+        tools: true,
+        vision: true,
+      },
+    });
+    expect(getModelInfo('doubao', 'doubao-seed-evolving')).toMatchObject({
+      id: 'doubao-seed-evolving',
+      name: 'Doubao Seed Evolving',
+      contextWindow: 256000,
+      outputWindow: 32768,
+      capabilities: {
+        streaming: true,
+        tools: true,
+        vision: true,
+      },
+    });
+    expect(getModelInfo('doubao', 'doubao-seed-character-260628')).toMatchObject({
+      id: 'doubao-seed-character-260628',
+      name: 'Doubao Seed Character',
+      contextWindow: 256000,
+      outputWindow: 32768,
+      capabilities: {
+        streaming: true,
+        tools: true,
+        vision: true,
+      },
+    });
+  });
+
+  it('includes latest official Grok models with explicit output limits', () => {
+    expect(getProvider('grok')?.models[0]?.id).toBe('grok-4.6');
+    expect(getModelInfo('grok', 'grok-4.6')).toMatchObject({
+      id: 'grok-4.6',
+      name: 'Grok 4.6',
+      contextWindow: 500000,
+      outputWindow: 500000,
+      capabilities: {
+        streaming: true,
+        tools: true,
+        vision: true,
+      },
+    });
+    expect(getModelInfo('grok', 'grok-4.5')).toMatchObject({
+      id: 'grok-4.5',
+      contextWindow: 500000,
+      outputWindow: 500000,
+    });
+    expect(getModelInfo('grok', 'grok-4.3')).toMatchObject({
+      id: 'grok-4.3',
+      contextWindow: 1000000,
+      outputWindow: 30000,
+    });
+    expect(getModelInfo('grok', 'grok-build-0.1')).toMatchObject({
+      id: 'grok-build-0.1',
+      contextWindow: 256000,
+      outputWindow: 256000,
+    });
+  });
+
+  it.each([
+    ['kimi', 'kimi-k3', { mode: 'enabled', effort: 'high' }, { reasoning_effort: 'high' }],
+    ['grok', 'grok-4.6', { mode: 'enabled', effort: 'xhigh' }, { reasoning_effort: 'xhigh' }],
+    ['grok', 'grok-4.5', { mode: 'enabled', effort: 'medium' }, { reasoning_effort: 'medium' }],
+    ['grok', 'grok-4.3', { mode: 'disabled', effort: 'none' }, { reasoning_effort: 'none' }],
     ['kimi', 'kimi-k2.6', { mode: 'disabled' }, { thinking: { type: 'disabled' } }],
     ['glm', 'glm-5.1', { mode: 'enabled' }, { thinking: { type: 'enabled' } }],
+    [
+      'glm',
+      'glm-5.2',
+      { mode: 'enabled', effort: 'minimal' },
+      { thinking: { type: 'enabled' }, reasoning_effort: 'minimal' },
+    ],
+    [
+      'glm',
+      'glm-5.2',
+      { mode: 'enabled', effort: 'xhigh' },
+      { thinking: { type: 'enabled' }, reasoning_effort: 'xhigh' },
+    ],
+    ['glm', 'glm-5.2', { mode: 'disabled' }, { thinking: { type: 'disabled' } }],
     ['xiaomi', 'mimo-v2.5', { mode: 'disabled' }, { thinking: { type: 'disabled' } }],
     [
       'deepseek',
@@ -134,6 +609,24 @@ describe('OpenAI provider defaults', () => {
       { reasoning_effort: 'high' },
     ],
     [
+      'doubao',
+      'doubao-seed-2-1-pro-260628',
+      { mode: 'enabled', effort: 'high' },
+      { reasoning_effort: 'high' },
+    ],
+    [
+      'doubao',
+      'doubao-seed-evolving',
+      { mode: 'enabled', effort: 'medium' },
+      { reasoning_effort: 'medium' },
+    ],
+    [
+      'doubao',
+      'doubao-seed-character-260628',
+      { mode: 'disabled' },
+      { thinking: { type: 'disabled' } },
+    ],
+    [
       'openrouter',
       'deepseek/deepseek-v4-pro',
       { mode: 'enabled', effort: 'high' },
@@ -158,6 +651,66 @@ describe('OpenAI provider defaults', () => {
       expect(body).toMatchObject(expected);
     },
   );
+
+  it('sends the driver route thinking toggle required by the custom OpenAI gateway', async () => {
+    const body = await captureInjectedRequestBody(
+      'openai',
+      'deepseek-v4-flash-vision-exp',
+      { enabled: true },
+      'https://gateway.example/v1',
+    );
+
+    expect(body).toMatchObject({
+      chat_template_kwargs: { thinking: true },
+    });
+    expect(body).not.toHaveProperty('reasoning_effort');
+    expect(body).not.toHaveProperty('enable_thinking');
+  });
+
+  it('recovers reasoning_content from a custom OpenAI gateway stream', async () => {
+    const originalFetch = globalThis.fetch;
+    const fetchMock = vi.fn(async () => {
+      const payload = {
+        choices: [{ index: 0, delta: { reasoning_content: 'Inspect the evidence' } }],
+      };
+      return new Response(`data: ${JSON.stringify(payload)}\n\ndata: [DONE]\n\n`, {
+        status: 200,
+        headers: { 'content-type': 'text/event-stream' },
+      });
+    });
+
+    try {
+      globalThis.fetch = fetchMock as typeof fetch;
+      getModel({
+        providerId: 'openai',
+        modelId: 'deepseek-v4-flash-vision-exp',
+        apiKey: 'sk-test',
+        baseUrl: 'https://gateway.example/v1',
+      });
+      const options = openAiMock.createOpenAI.mock.calls.at(-1)?.[0] as
+        | { fetch?: typeof fetch }
+        | undefined;
+      const response = await options?.fetch?.('https://gateway.example/v1/chat/completions', {
+        method: 'POST',
+        body: JSON.stringify({ stream: true }),
+      });
+      const normalized = await response?.text();
+
+      expect(normalized).toContain('<think>Inspect the evidence');
+      expect(normalized).not.toContain('reasoning_content');
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it('omits a zero SiliconFlow thinking budget when thinking is disabled', async () => {
+    const body = await captureInjectedRequestBody('siliconflow', 'deepseek-ai/DeepSeek-V3.2', {
+      mode: 'disabled',
+    });
+
+    expect(body).toMatchObject({ enable_thinking: false });
+    expect(body).not.toHaveProperty('thinking_budget');
+  });
 
   it('disables Lemonade thinking by default for recognized local reasoning models', async () => {
     const body = await captureInjectedRequestBody('lemonade', 'Gemma-4-26B-A4B-it-GGUF');

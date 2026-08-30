@@ -94,7 +94,10 @@
 
 import type { TTSModelConfig } from './types';
 import { isCustomTTSProvider } from './types';
-import { TTS_PROVIDERS } from './constants';
+import { isQwenCloneVoice, resolveTTSModelForVoice, TTS_PROVIDERS } from './constants';
+import { downloadAudio, QwenVoiceCloneError, synthesizeQwenVoiceClone } from './qwen-voice-clone';
+import { evictQwenVoiceRegistrationMemo } from './qwen-voice-clone-registration';
+import { splitConcatenatedJsonObjects } from './json-stream';
 import {
   VOXCPM_VLLM_MODEL_ID,
   VOXCPM_AUTO_VOICE_ID,
@@ -127,6 +130,61 @@ export class TTSRateLimitError extends Error {
   }
 }
 
+/** Neutral identity for ordinary Qwen TTS failures (never VC-branded). */
+export class QwenTTSError extends Error {
+  readonly code = 'QWEN_TTS_ERROR';
+  readonly httpStatus: number;
+
+  constructor(message: string, httpStatus = 502) {
+    super(message);
+    this.name = 'QwenTTSError';
+    this.httpStatus = httpStatus;
+  }
+}
+
+/**
+ * Per-request bound for one TTS provider call, ported from the reference
+ * runtime's TTS bounds (30s request timeouts on the managed TTS clients).
+ * Overridable via `TTS_REQUEST_TIMEOUT_MS` (ms) for deployments with slower
+ * upstreams; a hung provider fails the call with this error instead of
+ * wedging the session.
+ */
+const DEFAULT_TTS_REQUEST_TIMEOUT_MS = 30_000;
+
+function ttsRequestTimeoutMs(): number {
+  const raw = process.env.TTS_REQUEST_TIMEOUT_MS?.trim();
+  const parsed = raw ? Number(raw) : NaN;
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_TTS_REQUEST_TIMEOUT_MS;
+}
+
+/**
+ * Thrown when a single TTS provider request exceeds {@link ttsRequestTimeoutMs}.
+ * Distinct from `AbortSignal`-driven cancellation (session cancel): a timeout
+ * is a provider failure the caller may retry.
+ */
+export class TTSRequestTimeoutError extends Error {
+  constructor(
+    public readonly provider: string,
+    message: string,
+  ) {
+    super(message);
+    this.name = 'TTSRequestTimeoutError';
+  }
+}
+
+/** Combine the caller's cancel signal with the per-request timeout. */
+function ttsRequestSignal(callerSignal?: AbortSignal): AbortSignal {
+  const timeout = AbortSignal.timeout(ttsRequestTimeoutMs());
+  return callerSignal ? AbortSignal.any([callerSignal, timeout]) : timeout;
+}
+
+/** True when `signal` aborted because the per-request timeout fired. */
+function isTimeoutSignal(signal: AbortSignal): boolean {
+  return (
+    signal.aborted && signal.reason instanceof DOMException && signal.reason.name === 'TimeoutError'
+  );
+}
+
 /**
  * Map an upstream HTTP 429 to a typed {@link TTSRateLimitError} so the API route
  * can surface it as 429 instead of a generic 500. Call right after an
@@ -140,6 +198,11 @@ export function throwIfTtsRateLimited(provider: string, status: number): void {
 
 /**
  * Generate speech using specified TTS provider
+ *
+ * Every provider request is created with a signal that combines the caller's
+ * cancel signal (`config.signal`) with the per-request timeout, so a session
+ * cancel aborts the in-flight fetch within seconds and a hung provider fails
+ * with {@link TTSRequestTimeoutError} instead of hanging forever.
  */
 export async function generateTTS(
   config: TTSModelConfig,
@@ -152,42 +215,56 @@ export async function generateTTS(
     throw new Error(`API key required for TTS provider: ${config.providerId}`);
   }
 
-  switch (config.providerId) {
-    case 'openai-tts':
-      return await generateOpenAITTS(config, text);
+  const signal = ttsRequestSignal(config.signal);
+  try {
+    switch (config.providerId) {
+      case 'openai-tts':
+        return await generateOpenAITTS(config, text, signal);
 
-    case 'azure-tts':
-      return await generateAzureTTS(config, text);
+      case 'azure-tts':
+        return await generateAzureTTS(config, text, signal);
 
-    case 'glm-tts':
-      return await generateGLMTTS(config, text);
+      case 'glm-tts':
+        return await generateGLMTTS(config, text, signal);
 
-    case 'qwen-tts':
-      return await generateQwenTTS(config, text);
+      case 'qwen-tts':
+        return await generateQwenTTS(config, text, signal);
 
-    case 'voxcpm-tts':
-      return await generateVoxCPMTTS(config, text);
+      case 'voxcpm-tts':
+        return await generateVoxCPMTTS(config, text, signal);
 
-    case 'minimax-tts':
-      return await generateMiniMaxTTS(config, text);
-    case 'doubao-tts':
-      return await generateDoubaoTTS(config, text);
-    case 'elevenlabs-tts':
-      return await generateElevenLabsTTS(config, text);
+      case 'minimax-tts':
+        return await generateMiniMaxTTS(config, text, signal);
+      case 'doubao-tts':
+        return await generateDoubaoTTS(config, text, signal);
+      case 'elevenlabs-tts':
+        return await generateElevenLabsTTS(config, text, signal);
 
-    case 'lemonade-tts':
-      return await generateLemonadeTTS(config, text);
+      case 'lemonade-tts':
+        return await generateLemonadeTTS(config, text, signal);
 
-    case 'browser-native-tts':
-      throw new Error(
-        'Browser Native TTS must be handled client-side using Web Speech API. This provider cannot be used on the server.',
+      case 'browser-native-tts':
+        throw new Error(
+          'Browser Native TTS must be handled client-side using Web Speech API. This provider cannot be used on the server.',
+        );
+
+      default:
+        if (isCustomTTSProvider(config.providerId)) {
+          return await generateOpenAITTS(config, text, signal);
+        }
+        throw new Error(`Unsupported TTS provider: ${config.providerId}`);
+    }
+  } catch (error) {
+    // A caller cancel must propagate as-is so the enclosing run treats it as an
+    // interruption, not a provider failure.
+    if (config.signal?.aborted) throw error;
+    if (isTimeoutSignal(signal)) {
+      throw new TTSRequestTimeoutError(
+        config.providerId,
+        `TTS request timed out after ${ttsRequestTimeoutMs()}ms (provider ${config.providerId}) — the provider did not respond. Retry the tool call.`,
       );
-
-    default:
-      if (isCustomTTSProvider(config.providerId)) {
-        return await generateOpenAITTS(config, text);
-      }
-      throw new Error(`Unsupported TTS provider: ${config.providerId}`);
+    }
+    throw error;
   }
 }
 
@@ -197,6 +274,7 @@ export async function generateTTS(
 async function generateOpenAITTS(
   config: TTSModelConfig,
   text: string,
+  signal: AbortSignal,
 ): Promise<TTSGenerationResult> {
   const baseUrl = config.baseUrl || TTS_PROVIDERS['openai-tts'].defaultBaseUrl;
 
@@ -213,6 +291,7 @@ async function generateOpenAITTS(
       voice: config.voice,
       speed: config.speed || 1.0,
     }),
+    signal,
   });
 
   if (!response.ok) {
@@ -236,6 +315,7 @@ async function generateOpenAITTS(
 async function generateLemonadeTTS(
   config: TTSModelConfig,
   text: string,
+  signal: AbortSignal,
 ): Promise<TTSGenerationResult> {
   const baseUrl = (config.baseUrl || TTS_PROVIDERS['lemonade-tts'].defaultBaseUrl || '').replace(
     /\/$/,
@@ -257,6 +337,7 @@ async function generateLemonadeTTS(
       speed: config.speed || 1.0,
       response_format: config.format || 'wav',
     }),
+    signal,
   });
 
   if (!response.ok) {
@@ -281,6 +362,7 @@ async function generateLemonadeTTS(
 async function generateVoxCPMTTS(
   config: TTSModelConfig,
   text: string,
+  signal: AbortSignal,
 ): Promise<TTSGenerationResult> {
   const baseUrl = (config.baseUrl || TTS_PROVIDERS['voxcpm-tts'].defaultBaseUrl || '').replace(
     /\/$/,
@@ -325,10 +407,10 @@ async function generateVoxCPMTTS(
 
   const response =
     backend === 'nano-vllm'
-      ? await postVoxCPMNanoVLLM(baseUrl, request, config.apiKey)
+      ? await postVoxCPMNanoVLLM(baseUrl, request, config.apiKey, signal)
       : backend === 'python-api'
-        ? await postVoxCPMPythonAPI(baseUrl, request, config.apiKey)
-        : await postVoxCPMVLLMOmni(baseUrl, request, config);
+        ? await postVoxCPMPythonAPI(baseUrl, request, config.apiKey, signal)
+        : await postVoxCPMVLLMOmni(baseUrl, request, config, signal);
 
   if (!response.ok) {
     throwIfTtsRateLimited('VoxCPM', response.status);
@@ -400,6 +482,7 @@ async function postVoxCPMVLLMOmni(
     referenceAudioName?: string;
   },
   config: TTSModelConfig,
+  signal: AbortSignal,
 ): Promise<Response> {
   const payload: Record<string, unknown> = {
     model: getVLLMOmniModelId(config),
@@ -434,6 +517,7 @@ async function postVoxCPMVLLMOmni(
       ...getBackendAuthHeaders(config.apiKey),
     },
     body: JSON.stringify(payload),
+    signal,
   });
 }
 
@@ -476,6 +560,7 @@ async function postVoxCPMPythonAPI(
     referenceAudioName?: string;
   },
   apiKey?: string,
+  signal?: AbortSignal,
 ): Promise<Response> {
   const formData = new FormData();
   formData.set('text', params.targetText);
@@ -498,6 +583,7 @@ async function postVoxCPMPythonAPI(
     method: 'POST',
     headers: getBackendAuthHeaders(apiKey),
     body: formData,
+    signal,
   });
 }
 
@@ -512,6 +598,7 @@ async function postVoxCPMNanoVLLM(
     referenceAudioName?: string;
   },
   apiKey?: string,
+  signal?: AbortSignal,
 ): Promise<Response> {
   const payload: Record<string, unknown> = {
     target_text: params.targetText,
@@ -536,6 +623,7 @@ async function postVoxCPMNanoVLLM(
       ...getBackendAuthHeaders(apiKey),
     },
     body: JSON.stringify(payload),
+    signal,
   });
 }
 
@@ -559,6 +647,7 @@ async function readTTSApiError(response: Response): Promise<string> {
 async function generateAzureTTS(
   config: TTSModelConfig,
   text: string,
+  signal: AbortSignal,
 ): Promise<TTSGenerationResult> {
   const baseUrl = config.baseUrl || TTS_PROVIDERS['azure-tts'].defaultBaseUrl;
 
@@ -580,6 +669,7 @@ async function generateAzureTTS(
       'X-Microsoft-OutputFormat': 'audio-16khz-128kbitrate-mono-mp3',
     },
     body: ssml,
+    signal,
   });
 
   if (!response.ok) {
@@ -597,7 +687,11 @@ async function generateAzureTTS(
 /**
  * GLM TTS implementation (GLM API)
  */
-async function generateGLMTTS(config: TTSModelConfig, text: string): Promise<TTSGenerationResult> {
+async function generateGLMTTS(
+  config: TTSModelConfig,
+  text: string,
+  signal: AbortSignal,
+): Promise<TTSGenerationResult> {
   const baseUrl = config.baseUrl || TTS_PROVIDERS['glm-tts'].defaultBaseUrl;
 
   const response = await fetch(`${baseUrl}/audio/speech`, {
@@ -614,6 +708,7 @@ async function generateGLMTTS(config: TTSModelConfig, text: string): Promise<TTS
       volume: 1.0,
       response_format: 'wav',
     }),
+    signal,
   });
 
   if (!response.ok) {
@@ -641,13 +736,40 @@ async function generateGLMTTS(config: TTSModelConfig, text: string): Promise<TTS
 /**
  * Qwen TTS implementation (DashScope API - Qwen3 TTS Flash)
  */
-async function generateQwenTTS(config: TTSModelConfig, text: string): Promise<TTSGenerationResult> {
+async function generateQwenTTS(
+  config: TTSModelConfig,
+  text: string,
+  signal: AbortSignal,
+): Promise<TTSGenerationResult> {
   const baseUrl = config.baseUrl || TTS_PROVIDERS['qwen-tts'].defaultBaseUrl;
+  const cloneVoice = isQwenCloneVoice(config.voice);
+
+  if (cloneVoice) {
+    const targetModel =
+      config.providerOptions?.qwenVoiceClone === true
+        ? config.modelId
+        : resolveTTSModelForVoice('qwen-tts', config.voice, config.modelId);
+    try {
+      return await synthesizeQwenVoiceClone(
+        { apiKey: config.apiKey, baseUrl, targetModel },
+        text,
+        config.voice,
+        config.speed,
+        signal,
+      );
+    } catch (error) {
+      if (error instanceof QwenVoiceCloneError && error.code === 'QWEN_VC_VOICE_NOT_FOUND') {
+        evictQwenVoiceRegistrationMemo(config.voice);
+      }
+      throw error;
+    }
+  }
 
   // Calculate speed: Qwen3 uses rate parameter from -500 to 500
   // speed 1.0 = rate 0, speed 2.0 = rate 500, speed 0.5 = rate -250
   const rate = Math.round(((config.speed || 1.0) - 1.0) * 500);
 
+  const modelId = resolveTTSModelForVoice('qwen-tts', config.voice, config.modelId);
   const response = await fetch(`${baseUrl}/services/aigc/multimodal-generation/generation`, {
     method: 'POST',
     headers: {
@@ -655,7 +777,7 @@ async function generateQwenTTS(config: TTSModelConfig, text: string): Promise<TT
       'Content-Type': 'application/json; charset=utf-8',
     },
     body: JSON.stringify({
-      model: config.modelId || 'qwen3-tts-flash',
+      model: modelId || 'qwen3-tts-flash',
       input: {
         text,
         voice: config.voice,
@@ -665,33 +787,47 @@ async function generateQwenTTS(config: TTSModelConfig, text: string): Promise<TT
         rate, // Speech rate from -500 to 500
       },
     }),
+    signal,
   });
 
   if (!response.ok) {
     throwIfTtsRateLimited('Qwen', response.status);
     const errorText = await response.text().catch(() => response.statusText);
-    throw new Error(`Qwen TTS API error: ${errorText}`);
+    throw new QwenTTSError(`Qwen TTS request failed: ${errorText}`, response.status);
   }
 
   const data = await response.json();
 
   // Check for audio URL in response
   if (!data.output?.audio?.url) {
-    throw new Error(`Qwen TTS error: No audio URL in response. Response: ${JSON.stringify(data)}`);
+    throw new QwenTTSError('Qwen TTS returned no audio URL.');
   }
 
   // Download audio from URL
-  const audioUrl = data.output.audio.url;
-  const audioResponse = await fetch(audioUrl);
-
-  if (!audioResponse.ok) {
-    throw new Error(`Failed to download audio from URL: ${audioResponse.statusText}`);
+  let downloaded;
+  try {
+    downloaded = await downloadAudio(data.output.audio.url, signal, baseUrl);
+  } catch (error) {
+    if (error instanceof QwenVoiceCloneError) {
+      const host = (() => {
+        try {
+          return new URL(String(data.output.audio.url)).hostname || 'unknown';
+        } catch {
+          return 'invalid';
+        }
+      })();
+      throw new QwenTTSError(
+        error.code === 'QWEN_VC_AUDIO_URL_INVALID'
+          ? `The generated Qwen audio URL host "${host}" is not allowed.`
+          : 'The generated Qwen audio could not be downloaded.',
+        error.httpStatus,
+      );
+    }
+    throw error;
   }
 
-  const arrayBuffer = await audioResponse.arrayBuffer();
-
   return {
-    audio: new Uint8Array(arrayBuffer),
+    audio: downloaded.bytes,
     format: 'wav', // Qwen3 TTS returns WAV format
   };
 }
@@ -702,6 +838,7 @@ async function generateQwenTTS(config: TTSModelConfig, text: string): Promise<TT
 async function generateMiniMaxTTS(
   config: TTSModelConfig,
   text: string,
+  signal: AbortSignal,
 ): Promise<TTSGenerationResult> {
   const baseUrl = (config.baseUrl || TTS_PROVIDERS['minimax-tts'].defaultBaseUrl || '').replace(
     /\/$/,
@@ -732,6 +869,7 @@ async function generateMiniMaxTTS(
       },
       language_boost: 'auto',
     }),
+    signal,
   });
 
   if (!response.ok) {
@@ -766,6 +904,7 @@ async function generateMiniMaxTTS(
 async function generateElevenLabsTTS(
   config: TTSModelConfig,
   text: string,
+  signal: AbortSignal,
 ): Promise<TTSGenerationResult> {
   const baseUrl = config.baseUrl || TTS_PROVIDERS['elevenlabs-tts'].defaultBaseUrl;
   const requestedFormat = config.format || 'mp3';
@@ -797,6 +936,7 @@ async function generateElevenLabsTTS(
           speed: clampedSpeed,
         },
       }),
+      signal,
     },
   );
 
@@ -845,30 +985,57 @@ export async function getCurrentTTSConfig(): Promise<TTSModelConfig> {
 export { getAllTTSProviders, getTTSProvider, getTTSVoices } from './constants';
 
 /**
- * Doubao TTS 2.0 implementation (Volcengine Seed-TTS 2.0)
+ * Doubao TTS 2.0 implementation (Volcengine Seed-TTS 2.0).
+ *
+ * Two auth modes, distinguished by the API key shape — Volcengine exposes
+ * Seed-TTS as two separate products that do NOT share credentials or endpoints
+ * (verified: a plan key 401s on the normal endpoint, and the plan endpoint
+ * rejects Bearer auth):
+ *  - Standalone speech console: `appId:accessKey` → normal endpoint
+ *    (.../api/v3/tts/unidirectional) with `X-Api-App-Id` + `X-Api-Access-Key`.
+ *  - Ark Agent Plan: a single `ark-...` plan key → plan endpoint
+ *    (.../api/plan/tts/unidirectional, carried in config.baseUrl) with
+ *    `X-Api-Key`. Lit up via the Token Plan one-click setup.
+ * The endpoint and auth header are bound together, so we pick both from the key
+ * shape — never a normal endpoint with X-Api-Key, or vice versa.
  */
 async function generateDoubaoTTS(
   config: TTSModelConfig,
   text: string,
+  signal: AbortSignal,
 ): Promise<TTSGenerationResult> {
-  const colonIdx = (config.apiKey || '').indexOf(':');
-  if (colonIdx <= 0) {
+  const rawKey = config.apiKey || '';
+  if (!rawKey) {
     throw new Error(
-      'Doubao TTS requires API key in format "appId:accessKey". Get both from the Volcengine console.',
+      'Doubao TTS requires an API key: an Agent Plan key, or "appId:accessKey" from the Volcengine speech console.',
     );
   }
-  const appId = config.apiKey!.slice(0, colonIdx);
-  const accessKey = config.apiKey!.slice(colonIdx + 1);
+  const colonIdx = rawKey.indexOf(':');
+  // A colon means the classic appId:accessKey pair; otherwise treat the whole
+  // value as an Agent Plan single key (X-Api-Key auth on the /plan endpoint).
+  const isPlanKey = colonIdx < 0;
+  const appId = isPlanKey ? '' : rawKey.slice(0, colonIdx);
+  const accessKey = isPlanKey ? '' : rawKey.slice(colonIdx + 1);
+  // A colon with an empty half is a malformed pair — fail clearly rather than
+  // sending an empty appId/accessKey header that the API rejects opaquely.
+  if (!isPlanKey && (!appId || !accessKey)) {
+    throw new Error(
+      'Doubao TTS appId:accessKey is malformed — both halves are required (or use an Agent Plan key).',
+    );
+  }
 
   const baseUrl = config.baseUrl || TTS_PROVIDERS['doubao-tts'].defaultBaseUrl;
   const speechRate = Math.round(((config.speed || 1.0) - 1.0) * 100);
+
+  const authHeaders: Record<string, string> = isPlanKey
+    ? { 'X-Api-Key': rawKey }
+    : { 'X-Api-App-Id': appId, 'X-Api-Access-Key': accessKey };
 
   const response = await fetch(`${baseUrl}/unidirectional`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      'X-Api-App-Id': appId,
-      'X-Api-Access-Key': accessKey,
+      ...authHeaders,
       'X-Api-Resource-Id': 'seed-tts-2.0',
     },
     body: JSON.stringify({
@@ -879,6 +1046,7 @@ async function generateDoubaoTTS(
         audio_params: { format: 'mp3', sample_rate: 24000, speech_rate: speechRate },
       },
     }),
+    signal,
   });
 
   if (!response.ok) {
@@ -890,38 +1058,27 @@ async function generateDoubaoTTS(
   const responseText = await response.text();
   const audioChunks: Uint8Array[] = [];
 
-  let depth = 0;
-  let start = -1;
-  for (let i = 0; i < responseText.length; i++) {
-    if (responseText[i] === '{') {
-      if (depth === 0) start = i;
-      depth++;
-    } else if (responseText[i] === '}') {
-      depth--;
-      if (depth === 0 && start >= 0) {
-        let chunk: { code: number; message?: string; data?: string };
-        try {
-          chunk = JSON.parse(responseText.slice(start, i + 1));
-        } catch {
-          start = -1;
-          continue;
-        }
-        start = -1;
+  // Doubao streams a run of concatenated JSON objects with no delimiter. Split
+  // them string-aware (see splitConcatenatedJsonObjects) — a naive `{`/`}` depth
+  // counter miscounts braces that appear inside a string value (e.g. an error
+  // `message` containing `}`), which corrupts the object boundaries.
+  for (const objectText of splitConcatenatedJsonObjects(responseText)) {
+    let chunk: { code: number; message?: string; data?: string };
+    try {
+      chunk = JSON.parse(objectText);
+    } catch {
+      continue;
+    }
 
-        if (chunk.code === 0 && chunk.data) {
-          audioChunks.push(new Uint8Array(Buffer.from(chunk.data, 'base64')));
-        } else if (chunk.code === 20000000) {
-          break;
-        } else if (chunk.code && chunk.code !== 0) {
-          if (chunk.code === 45000000 || chunk.code === 45000292) {
-            throw new TTSRateLimitError(
-              'doubao-tts',
-              chunk.message || 'concurrency quota exceeded',
-            );
-          }
-          throw new Error(`Doubao TTS error: ${chunk.message || 'unknown'} (code: ${chunk.code})`);
-        }
+    if (chunk.code === 0 && chunk.data) {
+      audioChunks.push(new Uint8Array(Buffer.from(chunk.data, 'base64')));
+    } else if (chunk.code === 20000000) {
+      break;
+    } else if (chunk.code && chunk.code !== 0) {
+      if (chunk.code === 45000000 || chunk.code === 45000292) {
+        throw new TTSRateLimitError('doubao-tts', chunk.message || 'concurrency quota exceeded');
       }
+      throw new Error(`Doubao TTS error: ${chunk.message || 'unknown'} (code: ${chunk.code})`);
     }
   }
 

@@ -1,7 +1,10 @@
 import {
   resolveServerWebSearchProviderId,
+  isServerConfiguredProvider,
+  isServerProviderDisabled,
   resolveWebSearchApiKey,
   resolveWebSearchBaseUrl,
+  resolveWebSearchModel,
 } from '@/lib/server/provider-config';
 import { WEB_SEARCH_PROVIDERS } from '@/lib/web-search/constants';
 import type { BaiduSubSources, WebSearchProviderId } from '@/lib/web-search/types';
@@ -22,6 +25,9 @@ const OFFICIAL_CLIENT_BASE_URLS: Record<WebSearchProviderId, string[]> = {
     'https://api.search.brave.com',
   ],
   baidu: ['https://qianfan.baidubce.com'],
+  // The bare root is accepted for convenience; the Claude adapter normalizes it
+  // to the /v1 root, since the AI SDK appends "/messages" to the base URL.
+  claude: ['https://api.anthropic.com', 'https://api.anthropic.com/v1'],
   minimax: [
     'https://api.minimaxi.com',
     'https://api.minimaxi.com/v1',
@@ -32,6 +38,8 @@ const OFFICIAL_CLIENT_BASE_URLS: Record<WebSearchProviderId, string[]> = {
     'https://api.minimax.io/v1/coding_plan',
     'https://api.minimax.io/v1/coding_plan/search',
   ],
+  doubao: ['https://open.feedcoopapi.com', 'https://open.feedcoopapi.com/search_api/web_search'],
+  searxng: [],
 };
 
 function normalizeBaseUrl(value: string): string {
@@ -54,6 +62,9 @@ export function resolveSafeClientWebSearchBaseUrl(
   let normalized: string;
   try {
     const parsed = new URL(trimmed);
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+      throw new Error('Invalid protocol');
+    }
     normalized = normalizeBaseUrl(parsed.toString());
   } catch {
     throw new Error(`Unsupported ${WEB_SEARCH_PROVIDERS[providerId].name} base URL`);
@@ -77,6 +88,8 @@ export function resolveWebSearchRouteBaseUrl(
 export function resolveClassroomWebSearchConfig(input: {
   webSearchProviderId?: WebSearchProviderId;
   webSearchApiKey?: string;
+  webSearchBaseUrl?: string;
+  webSearchModelId?: string;
   baiduSubSources?: BaiduSubSources;
 }):
   | {
@@ -84,25 +97,39 @@ export function resolveClassroomWebSearchConfig(input: {
       apiKey: string;
       baseUrl?: string;
       baiduSubSources?: BaiduSubSources;
+      claudeModelId?: string;
     }
   | undefined {
   const requestedProviderId = assertWebSearchProviderId(input.webSearchProviderId)
     ? input.webSearchProviderId
     : undefined;
+  // A force-disabled requested provider yields to the operator's server default
+  // (server precedence, #665); resolveServerWebSearchProviderId already skips
+  // disabled providers internally.
   const providerId =
-    requestedProviderId ?? (resolveServerWebSearchProviderId() as WebSearchProviderId | undefined);
+    (requestedProviderId && !isServerProviderDisabled('webSearch', requestedProviderId)
+      ? requestedProviderId
+      : undefined) ?? (resolveServerWebSearchProviderId() as WebSearchProviderId | undefined);
   if (!providerId) return undefined;
 
   const provider = WEB_SEARCH_PROVIDERS[providerId];
   const apiKey = resolveWebSearchApiKey(providerId, input.webSearchApiKey);
   if (provider.requiresApiKey && !apiKey) return undefined;
 
+  const managed = isServerConfiguredProvider('webSearch', providerId);
+  const clientBaseUrl = managed || providerId === 'searxng' ? undefined : input.webSearchBaseUrl;
+  const baseUrl = resolveWebSearchRouteBaseUrl(providerId, clientBaseUrl);
+  if (provider.requiresBaseUrl && !baseUrl) return undefined;
+
   return {
     providerId,
     apiKey,
-    baseUrl: resolveWebSearchBaseUrl(providerId),
+    baseUrl,
     ...(providerId === 'baidu' && input.baiduSubSources
       ? { baiduSubSources: input.baiduSubSources }
+      : {}),
+    ...(providerId === 'claude'
+      ? { claudeModelId: resolveWebSearchModel('claude', input.webSearchModelId) }
       : {}),
   };
 }
