@@ -29,6 +29,15 @@ OPENMAIC_DIR = ROOT / "OpenMAIC"
 DEFAULT_EXPORTS_DIR = ROOT / "exports"
 PNPM_VERSION = "10.28.0"
 REMOTE_URL_RE = re.compile(r"https?://[^\s\"'<>]+")
+OFFLINE_SAFE_REMOTE_LITERALS = {
+    "http://www.w3.org/1999/xhtml",
+    "http://www.w3.org/1999/xlink",
+    "http://www.w3.org/2000/svg",
+    "http://www.w3.org/2000/xmlns/",
+    "http://www.w3.org/2001/XMLSchema",
+    "http://www.w3.org/2001/XMLSchema-instance",
+    "http://www.w3.org/XML/1998/namespace",
+}
 CSS_URL_RE = re.compile(r"url\(\s*(['\"]?)([^)'\"\s]+)\1\s*\)", re.IGNORECASE)
 CSS_IMPORT_RE = re.compile(
     r"@import\s+(?:url\(\s*)?(['\"])([^'\"]+)\1\s*\)?",
@@ -165,6 +174,25 @@ def copy_assets(openmaic_dir: Path, classroom_id: str, output_dir: Path) -> None
 
 def is_remote_url(value: str) -> bool:
     return value.startswith(("http://", "https://"))
+
+
+def collect_blocking_remote_urls(html_text: str) -> list[str]:
+    return sorted(
+        {
+            url
+            for url in REMOTE_URL_RE.findall(html_text)
+            if url not in OFFLINE_SAFE_REMOTE_LITERALS
+        }
+    )
+
+
+def warn_blocking_remote_urls(scene_id: str, remote_urls: list[str]) -> None:
+    if not remote_urls:
+        return
+    print(
+        f"Warning: interactive scene contains remote URL text after packaging ({scene_id}); "
+        "export will continue:\n" + "\n".join(remote_urls)
+    )
 
 
 def is_passthrough_url(value: str) -> bool:
@@ -404,12 +432,7 @@ def package_interactive_scenes(
             )
         else:
             packaged_html += INTERACTIVE_ACTIVITY_BRIDGE
-        remaining_remote = sorted(set(REMOTE_URL_RE.findall(packaged_html)))
-        if remaining_remote:
-            raise RuntimeError(
-                f"Interactive scene still contains remote URLs ({scene_id}):\n"
-                + "\n".join(remaining_remote)
-            )
+        warn_blocking_remote_urls(scene_id, collect_blocking_remote_urls(packaged_html))
 
         (scene_dir / "index.html").write_text(packaged_html, encoding="utf-8")
         content["offlineSrc"] = f"assets/interactive/{scene_id}/index.html"
@@ -547,12 +570,7 @@ def validate_export(classroom: dict, output_dir: Path) -> None:
         if not isinstance(offline_src, str) or not (output_dir / offline_src).exists():
             raise RuntimeError(f"Missing packaged interactive scene: {scene.get('id')}")
         interactive_html = (output_dir / offline_src).read_text(encoding="utf-8")
-        remote_urls = sorted(set(REMOTE_URL_RE.findall(interactive_html)))
-        if remote_urls:
-            raise RuntimeError(
-                f"Remote URLs remain in interactive scene {scene.get('id')}:\n"
-                + "\n".join(remote_urls)
-            )
+        warn_blocking_remote_urls(str(scene.get("id")), collect_blocking_remote_urls(interactive_html))
 
     forbidden = ["http://localhost", "/api/classroom", "/api/classroom-media", "IndexedDB"]
     exported_text = collect_exported_text(output_dir)

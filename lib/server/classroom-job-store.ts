@@ -1,6 +1,7 @@
 import { promises as fs } from 'fs';
 import path from 'path';
 import type {
+  ClassroomDeliveryMode,
   ClassroomGenerationProgress,
   ClassroomGenerationStep,
   GenerateClassroomInput,
@@ -30,6 +31,7 @@ export interface ClassroomGenerationJob {
     hasPdf: boolean;
     pdfTextLength: number;
     pdfImageCount: number;
+    deliveryMode?: GenerateClassroomInput['deliveryMode'] | 'server-default';
   };
   scenesGenerated: number;
   totalScenes?: number;
@@ -39,6 +41,7 @@ export interface ClassroomGenerationJob {
     classroomId: string;
     url: string;
     scenesCount: number;
+    deliveryMode?: ClassroomDeliveryMode;
     zipUrl?: string;
     artifactKey?: string;
     storage?: 'oss';
@@ -58,6 +61,7 @@ function buildInputSummary(input: GenerateClassroomInput): ClassroomGenerationJo
     hasPdf: !!input.pdfContent,
     pdfTextLength: input.pdfContent?.text.length || 0,
     pdfImageCount: input.pdfContent?.images.length || 0,
+    deliveryMode: input.deliveryMode ?? 'server-default',
   };
 }
 
@@ -203,6 +207,7 @@ export async function updateClassroomGenerationJobProgress(
 export async function markClassroomGenerationJobSucceeded(
   jobId: string,
   result: GenerateClassroomResult,
+  deliveryMode: ClassroomDeliveryMode,
   artifact?: PublishedClassroomArtifact,
 ): Promise<ClassroomGenerationJob> {
   return updateClassroomGenerationJob(jobId, {
@@ -216,6 +221,7 @@ export async function markClassroomGenerationJobSucceeded(
       classroomId: result.id,
       url: result.url,
       scenesCount: result.scenesCount,
+      deliveryMode,
       zipUrl: artifact?.zipUrl,
       artifactKey: artifact?.artifactKey,
       storage: artifact?.storage,

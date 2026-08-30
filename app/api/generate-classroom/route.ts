@@ -5,6 +5,7 @@ import { type GenerateClassroomInput } from '@/lib/server/classroom-generation';
 import { runClassroomGenerationJob } from '@/lib/server/classroom-job-runner';
 import { createClassroomGenerationJob } from '@/lib/server/classroom-job-store';
 import { buildRequestOrigin } from '@/lib/server/classroom-storage';
+import { shouldUploadCourseZipToOss } from '@/lib/server/course-oss-storage';
 import { createLogger } from '@/lib/logger';
 
 const log = createLogger('GenerateClassroom API');
@@ -14,8 +15,28 @@ export const maxDuration = 30;
 export async function POST(req: NextRequest) {
   let requirementSnippet: string | undefined;
   try {
-    const rawBody = (await req.json()) as Partial<GenerateClassroomInput>;
+    const rawBody = (await req.json()) as Omit<Partial<GenerateClassroomInput>, 'deliveryMode'> & {
+      deliveryMode?: unknown;
+    };
     requirementSnippet = rawBody.requirement?.substring(0, 60);
+    const deliveryMode = rawBody.deliveryMode;
+
+    if (deliveryMode !== undefined && deliveryMode !== 'online' && deliveryMode !== 'offline-oss') {
+      return apiError(
+        'INVALID_REQUEST',
+        400,
+        'Invalid deliveryMode: expected "online" or "offline-oss"',
+      );
+    }
+
+    if (deliveryMode === 'offline-oss' && !shouldUploadCourseZipToOss()) {
+      return apiError(
+        'INVALID_REQUEST',
+        400,
+        'deliveryMode "offline-oss" is not enabled on this server',
+      );
+    }
+
     const body: GenerateClassroomInput = {
       requirement: rawBody.requirement || '',
       ...(rawBody.pdfContent ? { pdfContent: rawBody.pdfContent } : {}),
@@ -32,6 +53,7 @@ export async function POST(req: NextRequest) {
         : {}),
       ...(rawBody.enableTTS != null ? { enableTTS: rawBody.enableTTS } : {}),
       ...(rawBody.agentMode ? { agentMode: rawBody.agentMode } : {}),
+      ...(deliveryMode ? { deliveryMode } : {}),
     };
     const { requirement } = body;
 

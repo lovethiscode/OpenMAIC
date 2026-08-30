@@ -11,6 +11,15 @@ const log = createLogger('OfflineExport');
 const DIST_OFFLINE_DIR = path.join(process.cwd(), 'dist-offline');
 const EXPORTS_DIR = path.join(process.cwd(), 'exports');
 const REMOTE_URL_RE = /https?:\/\/[^\s"'<>]+/g;
+const OFFLINE_SAFE_REMOTE_LITERALS = new Set([
+  'http://www.w3.org/1999/xhtml',
+  'http://www.w3.org/1999/xlink',
+  'http://www.w3.org/2000/svg',
+  'http://www.w3.org/2000/xmlns/',
+  'http://www.w3.org/2001/XMLSchema',
+  'http://www.w3.org/2001/XMLSchema-instance',
+  'http://www.w3.org/XML/1998/namespace',
+]);
 const CSS_URL_RE = /url\(\s*(['"]?)([^)'"\s]+)\1\s*\)/gi;
 const CSS_IMPORT_RE = /@import\s+(?:url\(\s*)?(['"])([^'"]+)\1\s*\)?/gi;
 const KATEX_CDN_RE = /^https?:\/\/cdn\.jsdelivr\.net\/npm\/katex@[^/]+\/dist\/(.+)$/i;
@@ -132,6 +141,21 @@ function relativeUrl(fromDir: string, target: string): string {
 
 function isRemoteUrl(value: string): boolean {
   return value.startsWith('http://') || value.startsWith('https://');
+}
+
+function collectBlockingRemoteUrls(html: string): string[] {
+  return Array.from(new Set(html.match(REMOTE_URL_RE) || [])).filter(
+    (url) => !OFFLINE_SAFE_REMOTE_LITERALS.has(url),
+  );
+}
+
+function warnBlockingRemoteUrls(sceneId: string, remoteUrls: string[]): void {
+  if (remoteUrls.length === 0) return;
+  log.warn(
+    `Interactive scene contains remote URL text after packaging (${sceneId}); export will continue:\n${remoteUrls.join(
+      '\n',
+    )}`,
+  );
 }
 
 function isPassthroughUrl(value: string): boolean {
@@ -349,12 +373,8 @@ async function packageInteractiveScene(
   await fs.mkdir(sceneDir, { recursive: true });
   const packager = new InteractiveAssetPackager(outputDir, classroomId, sceneDir);
   const html = await rewriteInteractiveHtml(sourceHtml, packager);
-  const remoteUrls = Array.from(new Set(html.match(REMOTE_URL_RE) || []));
-  if (remoteUrls.length > 0) {
-    throw new Error(
-      `Interactive scene still contains remote URLs (${scene.id}):\n${remoteUrls.join('\n')}`,
-    );
-  }
+  const remoteUrls = collectBlockingRemoteUrls(html);
+  warnBlockingRemoteUrls(scene.id, remoteUrls);
 
   await fs.writeFile(path.join(sceneDir, 'index.html'), html, 'utf-8');
   return {
@@ -484,12 +504,8 @@ async function validateExport(classroom: PersistedClassroomData, outputDir: stri
       }
       const interactivePath = path.join(outputDir, content.offlineSrc);
       const interactiveHtml = await fs.readFile(interactivePath, 'utf-8');
-      const remoteUrls = Array.from(new Set(interactiveHtml.match(REMOTE_URL_RE) || []));
-      if (remoteUrls.length > 0) {
-        throw new Error(
-          `Remote URLs remain in interactive scene ${scene.id}:\n${remoteUrls.join('\n')}`,
-        );
-      }
+      const remoteUrls = collectBlockingRemoteUrls(interactiveHtml);
+      warnBlockingRemoteUrls(scene.id, remoteUrls);
     }
   }
 

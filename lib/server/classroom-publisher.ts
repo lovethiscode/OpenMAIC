@@ -20,6 +20,10 @@ export interface PublishedClassroomArtifact {
   localClassroomAvailable?: boolean;
 }
 
+interface PublishClassroomOptions {
+  onUploadStarted?: () => Promise<void> | void;
+}
+
 async function cleanupLocalClassroomArtifacts(options: {
   classroomId: string;
   outputDir: string;
@@ -43,6 +47,7 @@ async function cleanupLocalClassroomArtifacts(options: {
 
 export async function publishClassroomIfConfigured(
   classroom: PersistedClassroomData,
+  options: PublishClassroomOptions = {},
 ): Promise<PublishedClassroomArtifact | undefined> {
   if (!shouldUploadCourseZipToOss()) {
     log.info('OSS upload disabled; keeping offline classroom package local only');
@@ -50,6 +55,7 @@ export async function publishClassroomIfConfigured(
   }
 
   const exported = await exportOfflineClassroomPackage(classroom);
+  await options.onUploadStarted?.();
   const uploaded = await uploadCoursePackageToOss({
     packagePath: exported.zipPath,
     courseId: classroom.id,

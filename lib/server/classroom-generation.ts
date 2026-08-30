@@ -45,7 +45,10 @@ export interface GenerateClassroomInput {
   enableVideoGeneration?: boolean;
   enableTTS?: boolean;
   agentMode?: 'default' | 'generate';
+  deliveryMode?: ClassroomDeliveryMode;
 }
+
+export type ClassroomDeliveryMode = 'online' | 'offline-oss';
 
 export type ClassroomGenerationStep =
   | 'initializing'
@@ -478,14 +481,6 @@ export async function generateClassroom(
   );
 
   log.info(`Classroom persisted: ${persisted.id}, URL: ${persisted.url}`);
-
-  await options.onProgress?.({
-    step: 'completed',
-    progress: 100,
-    message: 'Classroom generation completed',
-    scenesGenerated: scenes.length,
-    totalScenes: outlines.length,
-  });
 
   return {
     id: persisted.id,
